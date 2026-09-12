@@ -68,6 +68,16 @@ var collision_material: StandardMaterial3D = null
 ## Used for resolving material paths relative to the pack.
 var current_pack_folder: String = ""
 
+## Character definitions for this pack, from character_definitions.json.
+## Maps definition name -> {source_fbx, skinned, attachments}.
+var character_definitions: Dictionary = {}
+
+## Mesh names placed into the character scene currently being built, so the
+## static path skips exactly those and no others.
+var character_placed_meshes: Array = []
+
+var characters_saved: int = 0
+
 ## Default material name for the current pack (e.g., "PolygonFantasyKingdom_Mat_01_A").
 ## Detected automatically by scanning for *_Mat_01_A.tres files in the materials folder.
 ## Used as a final fallback when no material mapping exists for a mesh.
@@ -273,6 +283,8 @@ func process_pack_folder(pack_folder: String) -> void:
 		printerr("  Failed to load material mapping for pack. Skipping.")
 		return
 
+	load_character_definitions(pack_folder)
+
 	# Detect default material for this pack
 	var materials_path := pack_folder + "/materials"
 	default_material_name = _detect_default_material(materials_path)
@@ -347,6 +359,37 @@ func load_material_mapping(pack_folder: String) -> bool:
 	print("  Loaded material mapping with %d mesh entries" % mesh_to_materials.size())
 
 	return true
+
+
+## Loads character_definitions.json if present. Absence is normal - packs with
+## no skinned meshes have no characters - so this never fails the pack.
+func load_character_definitions(pack_folder: String) -> void:
+	character_definitions = {}
+
+	var path := pack_folder + "/character_definitions.json"
+	if not FileAccess.file_exists(path):
+		print("  No character_definitions.json (no rigged characters for this pack)")
+		return
+
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		push_warning("Failed to open %s" % path)
+		return
+
+	var json := JSON.new()
+	var err := json.parse(file.get_as_text())
+	file.close()
+	if err != OK:
+		printerr("Failed to parse character_definitions.json: %s" % json.get_error_message())
+		return
+
+	var data = json.get_data()
+	if not data is Dictionary:
+		printerr("Invalid character_definitions.json: expected Dictionary")
+		return
+
+	character_definitions = data
+	print("  Loaded %d character definition(s)" % character_definitions.size())
 
 
 ## Recursively finds all FBX files in the given directory.
@@ -439,12 +482,32 @@ func process_fbx_file(fbx_path: String) -> void:
 
 	print("    Found %d mesh(es)" % mesh_instances.size())
 
+	# Rigged characters first; they consume their meshes so the static path
+	# below does not also emit a bind-pose duplicate.
+	var consumed := {}
+	for def_name in character_definitions:
+		var def: Dictionary = character_definitions[def_name]
+		# Compare against the path relative to models/, not the basename:
+		# Characters.fbx and FixedScale/Characters.fbx share a basename.
+		if String(def.get("source_fbx", "")) != relative_path.get_basename():
+			continue
+		if not config_filter_pattern.is_empty() and not String(def_name).containsn(config_filter_pattern):
+			continue
+		if build_character_scene(scene_instance, String(def_name), def, relative_dir):
+			# Only meshes actually placed in the character scene are consumed.
+			# A skinned mesh skipped for a null Skin must still reach the static
+			# path, or it would disappear from the output entirely.
+			for m in character_placed_meshes:
+				consumed[String(m)] = true
+
 	if config_keep_meshes_together:
 		# Keep all meshes together in a single scene file
 		save_fbx_as_single_scene(scene_instance, mesh_instances, relative_dir, fbx_name)
 	else:
 		# Extract and save each mesh separately (default behavior)
 		for mesh_instance in mesh_instances:
+			if consumed.has(String(mesh_instance.name)):
+				continue
 			extract_and_save_mesh(mesh_instance, relative_dir, fbx_name)
 
 	# Clean up
@@ -621,6 +684,26 @@ func find_mesh_instances(node: Node) -> Array[MeshInstance3D]:
 
 
 ## Extracts mesh from MeshInstance3D, applies materials, and saves as .tscn.
+func _find_skeleton(node: Node) -> Skeleton3D:
+	if node is Skeleton3D:
+		return node
+	for child in node.get_children():
+		var found := _find_skeleton(child)
+		if found != null:
+			return found
+	return null
+
+
+func _find_node_named(node: Node, wanted: String) -> Node:
+	if String(node.name) == wanted:
+		return node
+	for child in node.get_children():
+		var found := _find_node_named(child, wanted)
+		if found != null:
+			return found
+	return null
+
+
 ## Creates a new scene with the mesh and material overrides pointing to
 ## external .tres files. Collision meshes get magenta material for visibility.
 ##
@@ -788,6 +871,153 @@ func extract_and_save_mesh(mesh_instance: MeshInstance3D, relative_dir: String, 
 		print("      Saved: %s (no materials)" % output_path.get_file())
 
 	meshes_saved += 1
+
+
+## Builds one rigged character scene: a cloned Skeleton3D, the character's
+## skinned mesh, its bone-attached equipment, and an empty AnimationPlayer.
+##
+## The skeleton is produced with duplicate() then emptied of children, rather
+## than rebuilt bone by bone, so bone rests and poses are reproduced exactly -
+## a subtly wrong bind pose deforms the character while still passing a
+## "has a skeleton" check.
+##
+## @param scene_instance Instantiated source FBX scene.
+## @param def_name Character/prefab name, used as the output scene name.
+## @param def Definition dictionary: source_fbx, skinned, attachments.
+## @param relative_dir Subdirectory path relative to meshes/ for output.
+## @returns bool True if a scene was saved.
+func build_character_scene(scene_instance: Node, def_name: String, def: Dictionary, relative_dir: String) -> bool:
+	var src_skel := _find_skeleton(scene_instance)
+	if src_skel == null:
+		printerr("    ERROR: %s has no Skeleton3D; falling back to static meshes" % def_name)
+		errors += 1
+		return false
+
+	character_placed_meshes = []
+
+	var root := Node3D.new()
+	root.name = def_name
+
+	var skel := src_skel.duplicate() as Skeleton3D
+	if skel == null:
+		printerr("    ERROR: could not duplicate skeleton for %s" % def_name)
+		root.free()
+		errors += 1
+		return false
+	for child in skel.get_children():
+		skel.remove_child(child)
+		child.queue_free()
+	skel.name = "Skeleton3D"
+	root.add_child(skel)
+
+	var attached := 0
+
+	for mesh_name in def.get("skinned", []):
+		var src := _find_node_named(scene_instance, String(mesh_name)) as MeshInstance3D
+		if src == null or src.mesh == null:
+			printerr("    WARNING: skinned mesh %s not found in FBX" % mesh_name)
+			warnings += 1
+			continue
+		if src.skin == null:
+			# A skinned mesh with no Skin cannot be posed. Leave it to the
+			# static path rather than emitting a character that cannot animate.
+			printerr("    WARNING: %s has no Skin; leaving it as a static mesh" % mesh_name)
+			warnings += 1
+			continue
+		var mi := src.duplicate() as MeshInstance3D
+		skel.add_child(mi)
+		mi.skin = src.skin
+		mi.skeleton = NodePath("..")
+		mi.transform = src.transform
+		_apply_materials_to(mi, String(mesh_name))
+		character_placed_meshes.append(String(mesh_name))
+		attached += 1
+
+	for item_name in def.get("attachments", []):
+		var src_item := _find_node_named(scene_instance, String(item_name))
+		if src_item == null:
+			printerr("    WARNING: attachment %s not found in FBX" % item_name)
+			warnings += 1
+			continue
+		# Godot's importer wraps bone-attached objects in a BoneAttachment3D.
+		# Duplicating that parent preserves bone_name; if the item is not
+		# bone-attached, duplicate the node itself.
+		var to_copy := src_item
+		if src_item.get_parent() is BoneAttachment3D:
+			to_copy = src_item.get_parent()
+		var copy := to_copy.duplicate()
+		skel.add_child(copy)
+		for mi2 in find_mesh_instances(copy):
+			_apply_materials_to(mi2, String(mi2.name))
+		character_placed_meshes.append(String(item_name))
+		attached += 1
+
+	if attached == 0:
+		printerr("    ERROR: %s produced no meshes; falling back to static" % def_name)
+		root.free()
+		errors += 1
+		return false
+
+	var player := AnimationPlayer.new()
+	player.name = "AnimationPlayer"
+	root.add_child(player)
+
+	# Scale belongs on the root: baking it into skinned vertices while leaving
+	# bone rests untouched breaks the bind pose.
+	if config_mesh_scale != 1.0:
+		root.scale = Vector3.ONE * config_mesh_scale
+
+	_set_owner_recursive(root, root)
+
+	var meshes_dir := current_pack_folder + "/meshes/" + _get_mesh_subfolder()
+	var output_path: String
+	if relative_dir.is_empty():
+		output_path = "%s/%s.%s" % [meshes_dir, def_name, config_mesh_format]
+	else:
+		output_path = "%s/%s/%s.%s" % [meshes_dir, relative_dir, def_name, config_mesh_format]
+	_ensure_directory_exists(output_path.get_base_dir())
+
+	var bone_count := skel.get_bone_count()
+
+	var scene := PackedScene.new()
+	if scene.pack(root) != OK:
+		printerr("    ERROR: failed to pack character scene: %s" % def_name)
+		root.free()
+		errors += 1
+		return false
+
+	var save_result := ResourceSaver.save(scene, output_path)
+	root.free()
+
+	if save_result != OK:
+		printerr("    ERROR: failed to save character scene: %s" % def_name)
+		errors += 1
+		return false
+
+	print("      Saved character: %s (%d bones)" % [def_name, bone_count])
+	characters_saved += 1
+	meshes_saved += 1
+	return true
+
+
+## Applies the pack's material overrides to one MeshInstance3D, reusing the
+## existing name-based lookup and its fallback chain.
+func _apply_materials_to(mesh_instance: MeshInstance3D, mesh_name: String) -> void:
+	if mesh_instance.mesh == null:
+		return
+	var material_names := get_material_names_for_mesh(mesh_name)
+	if material_names.is_empty():
+		return
+	var materials_dir := current_pack_folder + "/materials"
+	for i in range(mesh_instance.mesh.get_surface_count()):
+		if i >= material_names.size():
+			break
+		var mat_path := find_material_path(material_names[i], materials_dir)
+		if mat_path.is_empty():
+			continue
+		var mat := load(mat_path)
+		if mat != null:
+			mesh_instance.set_surface_override_material(i, mat)
 
 
 ## Looks up material names for a mesh by name.
@@ -1290,6 +1520,7 @@ func print_summary() -> void:
 	else:
 		print("  Mode:           Individual meshes")
 	print("  Meshes saved:   %d" % meshes_saved)
+	print("  Characters:     %d" % characters_saved)
 	print("  Meshes skipped: %d" % meshes_skipped)
 	print("  Warnings:       %d" % warnings)
 	print("  Errors:         %d" % errors)

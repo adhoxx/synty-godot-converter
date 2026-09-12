@@ -214,8 +214,17 @@ dropped; it does not make vertex-baked scaling correct for skinned geometry.
 
 Rigged characters carry scale on the scene root instead, which scales mesh,
 skeleton, and attachments coherently. This also gives the pack's inconsistent
-unit scales a clean home - POLYGON_Dungeon props measure ~0.0077 units while its
-characters measure ~204.
+unit scales a clean home. Measured on POLYGON_Dungeon:
+
+| Source | Bind-pose size | Units |
+|---|---|---|
+| `Models/Characters.fbx` | 204 x 188 x 64 | centimetres |
+| `Models/FixedScale/Characters.fbx` | 2.05 x 1.89 x 0.64 | **metres (correct)** |
+| props (e.g. `SM_Prop_Barrel_01`) | 0.0077 | ~1/100 metric |
+
+So `_FixedScale` is the variant Synty already corrected, and its character
+scenes are the ones to use as-is; the plain variants need x0.01. Props need
+x100. No single `--mesh-scale` value is right for all three.
 
 ## Component 2: Animation packs
 
