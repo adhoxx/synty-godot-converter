@@ -77,12 +77,12 @@ synty-converter/
 ├── gui.py                # Tkinter GUI wrapper
 ├── godot_converter.gd    # GDScript for Godot-side mesh processing
 ├── material_list.py      # MaterialList.txt parsing, mesh-material mapping
-├── prefab_parser.py      # Prefab-derived mesh-material mapping (MaterialList fallback)
+├── prefab_parser.py      # Prefab-derived mesh-material mapping + character definitions
 ├── shader_mapping.py     # Unity shader GUID → Godot shader mapping
 ├── tres_generator.py     # .tres material file generation
 ├── unity_parser.py       # Unity .mat file parsing
 ├── shaders/              # Godot shader files (polygon, foliage, water, etc.)
-├── tests/                # pytest suite (prefab_parser)
+├── tests/                # pytest suite (51 tests, no Godot needed)
 ├── dist/                 # Built exe output
 └── synty_converter.spec  # PyInstaller spec file
 ```
@@ -97,6 +97,35 @@ synty-converter/
 - **FBX path cleaning**: Strips SourceFiles/FBX/Models prefixes from paths
 - **Output subfolder**: Optional subfolder within output directory for organizing multiple packs (e.g., `output/synty/PackName/`)
 - **Retain subfolders**: Preserves original directory structure from source files when enabled
+
+### Characters and animations
+
+- **Rigged characters**: skinned meshes emit `Skeleton3D` + `skin` +
+  `BoneAttachment3D` equipment + `AnimationPlayer`, driven by
+  `character_definitions.json` derived from Unity prefabs (`m_IsActive` picks the
+  one enabled character out of the ~28 in each prefab)
+- **`source_fbx` is a Models-relative path, never a basename** - packs ship both
+  `Models/Characters.fbx` and `Models/FixedScale/Characters.fbx`, and matching on
+  basename builds every character twice from the wrong source
+- **`--mesh-scale` must never reach skinned vertices** - it would break the bind
+  pose; rigged characters carry scale on the scene root
+- **Animation packs**: auto-detected by `/Animations/` FBX ratio > 0.5, converted
+  to `animations/<Pack>_<Family>.res`, bound via `--animations`
+- **Binding is refused** on rig-family mismatch, unidentified rigs, or bone
+  coverage below 90%. POLYGON_Dungeon's 49-bone variant measures 75% and is
+  refused: below-threshold binding collapses the character, because pose tracks
+  apply relative to bone rests. The canonical 52-bone rig binds correctly.
+
+### Measured unit scales (POLYGON_Dungeon)
+
+| Source | Size | Units |
+|--------|------|-------|
+| `Models/Characters.fbx` | 204 x 188 | centimetres |
+| `Models/FixedScale/Characters.fbx` | 2.05 x 1.89 | **metres (correct)** |
+| props | 0.0077 | ~1/100 metric |
+
+No single `--mesh-scale` fits all three; `_FixedScale` character scenes are the
+ones usable as-is.
 
 ## Testing
 

@@ -76,6 +76,8 @@ This installs CustomTkinter for the graphical interface.
 | `--mesh-scale` | No | Scale factor for mesh output (e.g., `100` for undersized packs) |
 | `--output-subfolder` | No | Subfolder path prepended to pack folder names |
 | `--retain-subfolders` | No | Preserve Source_Files/FBX/ subdirectory structure in mesh output |
+| `--pack-type` | No | `auto` (default), `assets`, or `animations` |
+| `--animations` | No | Bind animation libraries to characters: `all` or comma-separated substrings |
 
 ## Output Structure
 
@@ -149,6 +151,60 @@ The converter uses a comprehensive fallback system to match meshes to materials:
 6. **Fuzzy matching** - Levenshtein distance <= 2 as last resort
 
 This handles naming inconsistencies between Unity prefabs and Godot mesh imports.
+
+## Characters and Animations
+
+Skinned meshes convert to rigged Godot scenes rather than static bind-pose
+meshes:
+
+```
+Character_Goblin_WarChief <Node3D>
+  Skeleton3D                                    # 49 bones
+    Character_Goblin_WarChief <MeshInstance3D>  # skin preserved
+    SM_Item_Goblin_WarBanner <BoneAttachment3D> # equipment on its bone
+  AnimationPlayer
+```
+
+Which body mesh and which equipment make up a character is read from the Unity
+prefab, which ships with every character in the pack present but all except one
+disabled. That mapping is written to `PACK_NAME/character_definitions.json`.
+
+`--mesh-scale` is never baked into skinned vertices - bone rests would keep the
+original scale and the bind pose would break - so rigged characters carry scale
+on the scene root instead.
+
+### Animation packs
+
+`ANIMATION_*` packages are detected automatically (by the share of FBX under
+`Animations/`) and convert to AnimationLibrary resources at
+`animations/<Pack>_<Family>.res`, one per rig family. Bind them to characters
+with `--animations`:
+
+```bash
+python converter.py ... --animations sword_combat,base_locomotion
+python converter.py ... --animations all
+```
+
+### Rig families, and when binding is refused
+
+Synty uses two incompatible rig families that share **no** bone names -
+`Polygon` (PascalCase: `Hips`, `Spine_01`) and `Sidekick` (camelCase: `pelvis`,
+`thigh_l`). Libraries are emitted per family, and binding is refused when:
+
+| Condition | Reason |
+|-----------|--------|
+| Family mismatch | Sidekick clips cannot drive a Polygon character |
+| Either rig unidentified | Two unknowns matching is not evidence they agree |
+| Bone coverage below 90% | The character uses a rig variant the clips were not authored for |
+
+That last case is real and common. POLYGON_Dungeon's characters use a 49-bone
+variant of the canonical 52-bone rig, measuring **75% coverage**. Binding anyway
+does not merely mis-pose the hands - animation tracks apply relative to bone
+rests, so a variant rig collapses the character entirely. The converter refuses
+and names the missing bones. An unanimated character is recoverable; a silently
+mangled one is not.
+
+Characters built on the canonical rig bind and animate correctly.
 
 ## GUI Features
 
