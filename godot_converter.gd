@@ -78,6 +78,9 @@ var character_placed_meshes: Array = []
 
 var characters_saved: int = 0
 
+## Count of successful animation-library binds, surfaced in the summary.
+var animations_bound: int = 0
+
 ## Default material name for the current pack (e.g., "PolygonFantasyKingdom_Mat_01_A").
 ## Detected automatically by scanning for *_Mat_01_A.tres files in the materials folder.
 ## Used as a final fallback when no material mapping exists for a mesh.
@@ -455,6 +458,14 @@ func _bind_animation_libraries(player: AnimationPlayer, skel: Skeleton3D) -> voi
 		elif base.ends_with("_Sidekick"):
 			library_family = "Sidekick"
 
+		# "Unknown" on either side means a rig we could not identify. Matching
+		# two unknowns is not evidence they are the same rig, so refuse both.
+		if library_family == "Unknown" or character_family == "Unknown":
+			printerr("      Refusing %s: unidentified rig (library=%s, character=%s)" % [
+				path.get_file(), library_family, character_family])
+			warnings += 1
+			continue
+
 		if library_family != character_family:
 			printerr("      Refusing %s: library rig is %s, character rig is %s" % [
 				path.get_file(), library_family, character_family])
@@ -464,14 +475,23 @@ func _bind_animation_libraries(player: AnimationPlayer, skel: Skeleton3D) -> voi
 		var report := _animation_bone_coverage(skel, library)
 		var coverage: float = report["coverage"]
 		if coverage < MIN_BONE_COVERAGE:
+			# Measured: binding at 75% coverage does not produce "correct body,
+			# wrong hands" - it collapses the character entirely, because pose
+			# tracks are applied relative to bone rests and a variant rig's
+			# rests differ. An unanimated character is recoverable; a silently
+			# mangled one is not. Refuse, and say exactly why.
 			var missing: Array = report["missing"]
-			printerr("      WARNING: %s covers %.0f%% of bones; missing: %s" % [
-				path.get_file(), coverage * 100.0, str(missing.slice(0, 8))])
+			printerr("      Refusing %s: only %.0f%% bone coverage (need %.0f%%); missing: %s" % [
+				path.get_file(), coverage * 100.0, MIN_BONE_COVERAGE * 100.0,
+				str(missing.slice(0, 8))])
+			printerr("        This character uses a rig variant the clips were not authored for.")
 			warnings += 1
+			continue
 
 		player.add_animation_library(base, library)
 		print("      Bound %s (%d clips, %.0f%% bone coverage)" % [
 			base, library.get_animation_list().size(), coverage * 100.0])
+		animations_bound += 1
 
 
 ## Classifies a skeleton as "Polygon", "Sidekick" or "Unknown".
@@ -1771,6 +1791,10 @@ func print_summary() -> void:
 		print("  Mode:           Individual meshes")
 	print("  Meshes saved:   %d" % meshes_saved)
 	print("  Characters:     %d" % characters_saved)
+	if not config_animation_libraries.is_empty():
+		print("  Anim binds:     %d" % animations_bound)
+		if animations_bound == 0:
+			printerr("  No animation libraries bound - see Refusing lines above")
 	print("  Meshes skipped: %d" % meshes_skipped)
 	print("  Warnings:       %d" % warnings)
 	print("  Errors:         %d" % errors)

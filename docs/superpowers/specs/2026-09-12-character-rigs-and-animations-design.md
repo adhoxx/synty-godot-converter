@@ -281,7 +281,20 @@ re-conversion.
 | Condition | Action |
 |---|---|
 | Family mismatch (Sidekick library, Polygon character) | Refuse to bind; warn naming both families |
-| Bone-name coverage below 90% | Bind, and warn listing the missing bones |
+| Either side's rig is `Unknown` | Refuse to bind; two unknowns matching is not evidence |
+| Bone-name coverage below 90% | **Refuse to bind**; warn with the missing bones |
+
+> **Policy revised 2026-09-12 after measurement.** This table originally said
+> coverage below 90% should bind anyway and warn. Measured, that produces a
+> visibly mangled character rather than a slightly-wrong one, and the warning
+> only reached Godot's debug output. Binding is now refused below threshold:
+> an unanimated character is recoverable, a silently broken one is not.
+>
+> Validated both directions. Canonical rig (`PolygonSyntyCharacter`, 52/52 bone
+> names) + a Polygon clip animates **correctly** - so the mechanism is sound and
+> the feature is useful wherever a pack ships canonical-rig characters.
+> POLYGON_Dungeon's 49-bone variant measures 75% and is now refused with an
+> explanation instead of bound into garbage.
 
 The coverage gate is what surfaces the `Thumb_01_1` / `Thumb_01_2` artifact.
 Auto-remapping is deliberately excluded: the suffixes come from encounter-order
