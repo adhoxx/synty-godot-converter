@@ -98,6 +98,7 @@ var config_mesh_scale: float = 1.0
 var config_output_subfolder: String = ""
 var config_retain_subfolders: bool = false
 var config_mode: String = "assets"
+var config_animation_libraries: Array = []
 
 ## Bone names unique to each Synty rig family. The families share no bone names
 ## at all - Polygon is PascalCase (Root, Hips, Spine_01), Sidekick is camelCase
@@ -162,6 +163,7 @@ func load_converter_config() -> bool:
 	var flatten_val = data.get("flatten_output", true)  # default is flatten (true)
 	config_retain_subfolders = not flatten_val
 	config_mode = data.get("mode", "assets")
+	config_animation_libraries = data.get("animation_libraries", [])
 
 	print("Config loaded:")
 	if not config_pack_name.is_empty():
@@ -376,6 +378,100 @@ func load_material_mapping(pack_folder: String) -> bool:
 	print("  Loaded material mapping with %d mesh entries" % mesh_to_materials.size())
 
 	return true
+
+
+## Minimum bone-name coverage before a bind is reported as suspect.
+const MIN_BONE_COVERAGE := 0.90
+
+
+## Fraction of the library's animated bone names that exist in the skeleton.
+##
+## Bones are compared by name. Godot disambiguates duplicate FBX bone names by
+## appending an index in encounter order, and that order differs between files,
+## so a character and a clip can disagree on finger-bone names while sharing an
+## identical skeleton. That is exactly what this measures - and why the result
+## is reported rather than repaired: a guessed correspondence could bind
+## left-hand tracks to the right hand.
+##
+## @returns Dictionary with "coverage" (float) and "missing" (Array).
+func _animation_bone_coverage(skel: Skeleton3D, library: AnimationLibrary) -> Dictionary:
+	var have := {}
+	for i in skel.get_bone_count():
+		have[skel.get_bone_name(i)] = true
+
+	var wanted := {}
+	for anim_name in library.get_animation_list():
+		var anim := library.get_animation(anim_name)
+		if anim == null:
+			continue
+		for t in anim.get_track_count():
+			var track_path := anim.track_get_path(t)
+			var bone := String(track_path.get_concatenated_subnames())
+			if not bone.is_empty():
+				wanted[bone] = true
+		# One animation is representative; scanning all of them on a
+		# 242-clip library is pure cost.
+		break
+
+	if wanted.is_empty():
+		return {"coverage": 1.0, "missing": []}
+
+	var missing := []
+	for bone in wanted:
+		if not have.has(bone):
+			missing.append(bone)
+
+	var coverage := float(wanted.size() - missing.size()) / float(wanted.size())
+	return {"coverage": coverage, "missing": missing}
+
+
+## Binds the configured animation libraries to one character's AnimationPlayer.
+## Refuses libraries from a different rig family outright; binds low-coverage
+## libraries but says so.
+func _bind_animation_libraries(player: AnimationPlayer, skel: Skeleton3D) -> void:
+	if config_animation_libraries.is_empty():
+		return
+
+	var character_family := _detect_rig_family(skel)
+
+	for lib_path in config_animation_libraries:
+		var path := String(lib_path)
+		if not ResourceLoader.exists(path):
+			printerr("      WARNING: animation library not found: %s" % path)
+			warnings += 1
+			continue
+
+		var library := load(path) as AnimationLibrary
+		if library == null:
+			printerr("      WARNING: not an AnimationLibrary: %s" % path)
+			warnings += 1
+			continue
+
+		# Family is encoded in the filename by process_animation_pack().
+		var base := path.get_file().get_basename()
+		var library_family := "Unknown"
+		if base.ends_with("_Polygon"):
+			library_family = "Polygon"
+		elif base.ends_with("_Sidekick"):
+			library_family = "Sidekick"
+
+		if library_family != character_family:
+			printerr("      Refusing %s: library rig is %s, character rig is %s" % [
+				path.get_file(), library_family, character_family])
+			warnings += 1
+			continue
+
+		var report := _animation_bone_coverage(skel, library)
+		var coverage: float = report["coverage"]
+		if coverage < MIN_BONE_COVERAGE:
+			var missing: Array = report["missing"]
+			printerr("      WARNING: %s covers %.0f%% of bones; missing: %s" % [
+				path.get_file(), coverage * 100.0, str(missing.slice(0, 8))])
+			warnings += 1
+
+		player.add_animation_library(base, library)
+		print("      Bound %s (%d clips, %.0f%% bone coverage)" % [
+			base, library.get_animation_list().size(), coverage * 100.0])
 
 
 ## Classifies a skeleton as "Polygon", "Sidekick" or "Unknown".
@@ -1114,6 +1210,7 @@ func build_character_scene(scene_instance: Node, def_name: String, def: Dictiona
 	var player := AnimationPlayer.new()
 	player.name = "AnimationPlayer"
 	root.add_child(player)
+	_bind_animation_libraries(player, skel)
 
 	# Scale belongs on the root: baking it into skinned vertices while leaving
 	# bone rests untouched breaks the bind pose.

@@ -337,6 +337,29 @@ characters against Polygon clips. Reported, not repaired. If hand poses prove
 visibly wrong in practice, structural parent-chain retargeting becomes its own
 piece of work.
 
+> **Measured outcome (2026-09-12, after implementation).** This risk is worse
+> than estimated. Binding ANIMATION_Sword_Combat to POLYGON_Dungeon characters
+> measures **75% bone coverage**, and the result is not "correct body, wrong
+> hands" - the character is **visibly mangled**, collapsed into a crumpled
+> heap.
+>
+> The spec's premise "animation clips need no retargeting" was measured against
+> the *canonical* `PolygonSyntyCharacter` rig (52/52 bone names). POLYGON_Dungeon
+> characters use a 49-bone variant sharing only 38 names, and its bone rests
+> differ from the animation rig's. Pose tracks are applied relative to bone
+> rests, so a rest mismatch garbles the whole skeleton, not just the fingers.
+>
+> The gates worked exactly as designed: family mismatches were refused, and the
+> coverage check reported 75% and named the missing bones
+> (`Prop_L`, `Prop_R`, `Thumb_01_1`, `IndexFinger_01_1`, ...). What is wrong is
+> the **policy**: binding below threshold and only warning produces a silently
+> broken character, and the warning never reaches the user-facing summary.
+>
+> Consequence: animation binding is **not usable for POLYGON_Dungeon
+> characters** as it stands. It remains correct for characters built on the
+> canonical rig, which is untested here because no such pack has been converted.
+> Real fix is structural (parent-chain) retargeting, still out of scope.
+
 **Skeleton cloning fidelity.** Cloning bones and rest transforms must reproduce
 the bind pose exactly, or characters deform. This is the highest-risk step and
 the first thing to verify visually rather than by assertion alone.
