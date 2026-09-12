@@ -418,3 +418,31 @@ def build_character_definitions(guid_map) -> dict[str, CharacterDefinition]:
 
     logger.debug("Derived %d character definition(s)", len(definitions))
     return definitions
+
+
+def write_character_definitions_json(
+    definitions: dict[str, CharacterDefinition],
+    output_path: Path,
+    *,
+    indent: int = 2,
+) -> None:
+    """Write character_definitions.json for godot_converter.gd.
+
+    Args:
+        definitions: Output of build_character_definitions().
+        output_path: Normally <pack_output_dir>/character_definitions.json.
+        indent: JSON indentation level.
+    """
+    payload = {
+        name: {
+            "source_fbx": d.source_fbx,
+            "skinned": d.skinned,
+            "attachments": d.attachments,
+        }
+        for name, d in definitions.items()
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(payload, indent=indent, ensure_ascii=False), encoding="utf-8"
+    )
+    logger.debug("Wrote %d character definition(s) to %s", len(payload), output_path)

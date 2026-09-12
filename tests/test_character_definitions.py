@@ -179,5 +179,31 @@ SkinnedMeshRenderer:
         )
 
 
+class TestWriteCharacterDefinitionsJson:
+    def test_writes_expected_json_shape(self, tmp_path):
+        from prefab_parser import write_character_definitions_json
+
+        defs = build_character_definitions(_guid_map({"pw": WARCHIEF}))
+        out = tmp_path / "character_definitions.json"
+        write_character_definitions_json(defs, out)
+
+        import json
+
+        assert json.loads(out.read_text(encoding="utf-8")) == {
+            "Character_Goblin_WarChief": {
+                "source_fbx": "Characters",
+                "skinned": ["Character_Goblin_WarChief"],
+                "attachments": ["SM_Item_Goblin_WarBanner"],
+            }
+        }
+
+    def test_creates_parent_directory(self, tmp_path):
+        from prefab_parser import write_character_definitions_json
+
+        out = tmp_path / "nested" / "character_definitions.json"
+        write_character_definitions_json({}, out)
+        assert out.exists()
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

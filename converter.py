@@ -59,7 +59,11 @@ from material_list import (
     get_custom_shader_materials,
     PrefabMaterials,
 )
-from prefab_parser import build_prefabs_from_package
+from prefab_parser import (
+    build_prefabs_from_package,
+    build_character_definitions,
+    write_character_definitions_json,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2412,6 +2416,15 @@ def run_conversion(config: ConversionConfig) -> ConversionStats:
                 else:
                     generate_mesh_material_mapping_json(prefabs, mapping_output)
                     logger.debug("Generated mesh_material_mapping.json to pack folder")
+
+                    # Character definitions drive rigged-character output in
+                    # godot_converter.gd. Absent file simply means no characters.
+                    char_defs = build_character_definitions(guid_map)
+                    if char_defs:
+                        write_character_definitions_json(
+                            char_defs, pack_output_dir / "character_definitions.json"
+                        )
+                        logger.info("Wrote %d character definition(s)", len(char_defs))
 
                 # Check for missing material references (no placeholders - just warn)
                 if not config.dry_run:
