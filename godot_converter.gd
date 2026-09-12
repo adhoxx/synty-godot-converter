@@ -97,6 +97,7 @@ var config_filter_pattern: String = ""
 var config_mesh_scale: float = 1.0
 var config_output_subfolder: String = ""
 var config_retain_subfolders: bool = false
+var config_mode: String = "assets"
 
 
 ## Loads configuration options from converter_config.json.
@@ -154,6 +155,7 @@ func load_converter_config() -> bool:
 	# flatten_output=true means don't retain subfolders, so retain_subfolders = NOT flatten_output
 	var flatten_val = data.get("flatten_output", true)  # default is flatten (true)
 	config_retain_subfolders = not flatten_val
+	config_mode = data.get("mode", "assets")
 
 	print("Config loaded:")
 	if not config_pack_name.is_empty():
@@ -168,6 +170,8 @@ func load_converter_config() -> bool:
 		print("  output_subfolder: %s" % config_output_subfolder)
 	if config_retain_subfolders:
 		print("  retain_subfolders: true")
+	if config_mode != "assets":
+		print("  mode: %s" % config_mode)
 
 	return true
 
@@ -278,6 +282,13 @@ func process_pack_folder(pack_folder: String) -> void:
 	print("Processing pack: %s" % pack_folder)
 	current_pack_folder = pack_folder
 
+	# Animation packs carry no materials or meshes to place - only clip FBX.
+	# process_animation_pack() reads current_pack_folder, so this must come
+	# after the assignment above.
+	if config_mode == "animations":
+		process_animation_pack(pack_folder)
+		return
+
 	# Load material mapping for this pack (each pack has its own mapping file)
 	if not load_material_mapping(pack_folder):
 		printerr("  Failed to load material mapping for pack. Skipping.")
@@ -359,6 +370,10 @@ func load_material_mapping(pack_folder: String) -> bool:
 	print("  Loaded material mapping with %d mesh entries" % mesh_to_materials.size())
 
 	return true
+
+
+func process_animation_pack(pack_folder: String) -> void:
+	print("  Animation pack mode not yet implemented: %s" % pack_folder)
 
 
 ## Loads character_definitions.json if present. Absence is normal - packs with
