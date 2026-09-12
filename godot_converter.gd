@@ -1091,7 +1091,20 @@ func scale_mesh(mesh: ArrayMesh, scale_factor: float) -> ArrayMesh:
 		arrays[Mesh.ARRAY_VERTEX] = verts
 		var mat := mesh.surface_get_material(surface_idx)
 		var primitive_type: Mesh.PrimitiveType = mesh.surface_get_primitive_type(surface_idx)
-		scaled.add_surface_from_arrays(primitive_type, arrays)
+
+		# The surface format MUST be passed through. surface_get_arrays() returns
+		# custom vertex arrays (ARRAY_CUSTOM0-3) as PackedByteArray, but without
+		# the matching format bits add_surface_from_arrays() validates them as
+		# the default type, fails with "Invalid array format for surface", and
+		# adds nothing - silently producing a mesh with zero surfaces.
+		# Synty's skinned character meshes carry such custom arrays.
+		var format := mesh.surface_get_format(surface_idx)
+		scaled.add_surface_from_arrays(primitive_type, arrays, [], {}, format)
+
+		if scaled.get_surface_count() <= surface_idx:
+			printerr("  Failed to rebuild surface %d while scaling; keeping unscaled mesh" % surface_idx)
+			return mesh
+
 		scaled.surface_set_material(surface_idx, mat)
 	return scaled
 
