@@ -13,6 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from prefab_parser import (  # noqa: E402
+    _is_game_object_active,
     build_prefabs_from_package,
     parse_prefab_bytes,
 )
@@ -352,6 +353,26 @@ class TestIntegrationWithMaterialList:
         prefabs = build_prefabs_from_package(guid_map)
         shader_cache, _unmatched = build_shader_cache(prefabs)
         assert shader_cache["Dungeons_Texture_01_Mat"].endswith(".gdshader")
+
+
+class TestIsGameObjectActive:
+    def test_active_flag_one_is_active(self):
+        assert _is_game_object_active("  m_Name: Foo\n  m_IsActive: 1\n") is True
+
+    def test_active_flag_zero_is_inactive(self):
+        assert _is_game_object_active("  m_Name: Foo\n  m_IsActive: 0\n") is False
+
+    def test_absent_flag_defaults_to_active(self):
+        """Older prefabs omit the field; treat them as visible rather than
+        silently dropping every mesh in the file."""
+        assert _is_game_object_active("  m_Name: Foo\n") is True
+
+    def test_malformed_flag_defaults_to_active(self):
+        assert _is_game_object_active("  m_IsActive: yes\n") is True
+
+    def test_reads_own_field_not_a_later_one(self):
+        body = "  m_Name: Foo\n  m_IsActive: 0\n  m_SomethingElse: 1\n"
+        assert _is_game_object_active(body) is False
 
 
 if __name__ == "__main__":

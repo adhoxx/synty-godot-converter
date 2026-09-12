@@ -65,6 +65,8 @@ _MATERIALS_BLOCK_PATTERN = re.compile(
 )
 _MATERIAL_GUID_PATTERN = re.compile(r"guid:\s*([a-f0-9]{32})")
 
+_IS_ACTIVE_PATTERN = re.compile(r"^\s*m_IsActive:\s*(\d+)\s*$", re.MULTILINE)
+
 # Trailing _LOD<n> used to order meshes so LOD0 leads.
 _LOD_SUFFIX_PATTERN = re.compile(r"_LOD(\d+)\s*$", re.IGNORECASE)
 
@@ -94,6 +96,22 @@ def _extract_material_guids(body: str) -> list[str]:
         return []
 
     return _MATERIAL_GUID_PATTERN.findall(block_match.group(1))
+
+
+def _is_game_object_active(body: str) -> bool:
+    """Whether a GameObject document is enabled.
+
+    Synty ships one prefab per character containing every character in the
+    pack, with all but one disabled, so this flag is what distinguishes a
+    character's own meshes from its 26 disabled siblings.
+
+    A missing or unparseable flag counts as active: dropping meshes because a
+    field was absent would silently empty the prefab.
+    """
+    match = _IS_ACTIVE_PATTERN.search(body)
+    if match is None:
+        return True
+    return match.group(1) != "0"
 
 
 def _lod_sort_key(index_and_mesh: tuple[int, MeshMaterials]) -> tuple[int, int]:
