@@ -33,8 +33,11 @@ break PyYAML and ruamel.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from material_list import MaterialSlot, MeshMaterials, PrefabMaterials
 
@@ -66,6 +69,10 @@ _MATERIALS_BLOCK_PATTERN = re.compile(
 _MATERIAL_GUID_PATTERN = re.compile(r"guid:\s*([a-f0-9]{32})")
 
 _IS_ACTIVE_PATTERN = re.compile(r"^\s*m_IsActive:\s*(\d+)\s*$", re.MULTILINE)
+
+_MESH_REF_PATTERN = re.compile(
+    r"^\s*m_Mesh:\s*\{fileID:\s*-?\d+,\s*guid:\s*([a-f0-9]{32})", re.MULTILINE
+)
 
 # Trailing _LOD<n> used to order meshes so LOD0 leads.
 _LOD_SUFFIX_PATTERN = re.compile(r"_LOD(\d+)\s*$", re.IGNORECASE)
@@ -274,3 +281,140 @@ def build_prefabs_from_package(guid_map) -> list[PrefabMaterials]:
         len(guid_to_material_name),
     )
     return prefabs
+
+
+@dataclass
+class CharacterDefinition:
+    """One character assembled from a Synty character prefab.
+
+    Attributes:
+        name: Prefab name, e.g. "Character_Goblin_WarChief".
+        source_fbx: Basename of the FBX holding the rig and meshes, e.g.
+            "Characters". Empty when the mesh GUID could not be resolved.
+        skinned: Names of active skinned meshes (the character body).
+        attachments: Names of active non-skinned meshes (equipment). Whether
+            each is bone-attached is left to Godot, which has already built a
+            BoneAttachment3D for it during FBX import.
+    """
+
+    name: str
+    source_fbx: str = ""
+    skinned: list[str] = field(default_factory=list)
+    attachments: list[str] = field(default_factory=list)
+
+
+def _models_relative_name(pathname: str) -> str:
+    """Path of an FBX relative to the pack's Models root, without extension.
+
+    Basenames are not unique: Synty packs ship both ``Models/Characters.fbx``
+    and ``Models/FixedScale/Characters.fbx``. Matching on the basename alone
+    would make every character definition match both files, building each
+    character twice and half of them from the wrong source. ``copy_fbx_files()``
+    mirrors the structure below ``Models/`` into the output ``models/``
+    directory, so that relative path is the stable identifier.
+
+    Args:
+        pathname: Unity asset path, e.g.
+            "Assets/PolygonDungeon/Models/FixedScale/Characters.fbx".
+
+    Returns:
+        "FixedScale/Characters" for the example above, "Characters" for a
+        top-level FBX, or "" when the path is empty or unresolvable.
+    """
+    if not pathname:
+        return ""
+
+    normalised = pathname.replace("\\", "/")
+    lowered = normalised.lower()
+
+    marker = "/models/"
+    index = lowered.rfind(marker)
+    if index >= 0:
+        relative = normalised[index + len(marker) :]
+    else:
+        relative = normalised.rsplit("/", 1)[-1]
+
+    if relative.lower().endswith(".fbx"):
+        relative = relative[: -len(".fbx")]
+    return relative
+
+
+def build_character_definitions(guid_map) -> dict[str, CharacterDefinition]:
+    """Derive character definitions from the package's prefabs.
+
+    A prefab is a character when it holds at least one *active*
+    SkinnedMeshRenderer. Synty ships one such prefab per character, each
+    containing the whole shared hierarchy with every other character disabled,
+    so the active set is exactly that character's body plus its equipment.
+
+    Args:
+        guid_map: unity_package.GuidMap with guid_to_pathname and
+            guid_to_prefab_content.
+
+    Returns:
+        Prefab name to CharacterDefinition, for character prefabs only.
+    """
+    prefab_content = getattr(guid_map, "guid_to_prefab_content", None) or {}
+    definitions: dict[str, CharacterDefinition] = {}
+
+    for guid, content in prefab_content.items():
+        pathname = guid_map.guid_to_pathname.get(guid, "")
+        prefab_name = pathname.rsplit("/", 1)[-1]
+        if prefab_name.lower().endswith(".prefab"):
+            prefab_name = prefab_name[: -len(".prefab")]
+        if not prefab_name:
+            continue
+
+        try:
+            text = content.decode("utf-8", errors="replace")
+        except Exception:  # pragma: no cover - decode with errors= rarely raises
+            continue
+
+        documents = _split_documents(text)
+        if not documents:
+            continue
+
+        active_names: dict[str, str] = {}
+        for class_id, anchor, body in documents:
+            if class_id != _CLASS_GAME_OBJECT:
+                continue
+            name_match = _NAME_PATTERN.search(body)
+            if name_match and _is_game_object_active(body):
+                active_names[anchor] = name_match.group(1)
+
+        skinned: list[str] = []
+        attachments: list[str] = []
+        mesh_guid = ""
+
+        for class_id, _anchor, body in documents:
+            if class_id not in _RENDERER_CLASSES:
+                continue
+            ref = _GAME_OBJECT_REF_PATTERN.search(body)
+            if not ref:
+                continue
+            name = active_names.get(ref.group(1))
+            if not name:
+                continue
+            if class_id == _CLASS_SKINNED_MESH_RENDERER:
+                skinned.append(name)
+                if not mesh_guid:
+                    mesh_match = _MESH_REF_PATTERN.search(body)
+                    if mesh_match:
+                        mesh_guid = mesh_match.group(1)
+            else:
+                attachments.append(name)
+
+        if not skinned:
+            continue
+
+        source_fbx = _models_relative_name(guid_map.guid_to_pathname.get(mesh_guid, ""))
+
+        definitions[prefab_name] = CharacterDefinition(
+            name=prefab_name,
+            source_fbx=source_fbx,
+            skinned=skinned,
+            attachments=attachments,
+        )
+
+    logger.debug("Derived %d character definition(s)", len(definitions))
+    return definitions
