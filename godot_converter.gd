@@ -724,9 +724,18 @@ func extract_and_save_mesh(mesh_instance: MeshInstance3D, relative_dir: String, 
 		meshes_skipped += 1
 		return
 
-	# Apply mesh scale if configured
+	# Apply mesh scale if configured.
+	# Skinned meshes must never have scale baked into their vertices: bone rest
+	# transforms would keep the original scale and the bind pose would break.
+	# Scale the node instead. (Rigged characters handle this on the scene root
+	# in build_character_scene(); this covers skinned meshes with no character
+	# definition.)
+	var scale_on_node := false
 	if config_mesh_scale != 1.0:
-		original_mesh = scale_mesh(original_mesh, config_mesh_scale)
+		if mesh_instance.skin != null:
+			scale_on_node = true
+		else:
+			original_mesh = scale_mesh(original_mesh, config_mesh_scale)
 
 	# Check if this is a collision mesh - apply green wireframe material
 	var is_collision := mesh_name.to_lower().contains("collision") or mesh_name.to_lower().ends_with("_col")
@@ -735,6 +744,9 @@ func extract_and_save_mesh(mesh_instance: MeshInstance3D, relative_dir: String, 
 	var scene_mesh_instance := MeshInstance3D.new()
 	scene_mesh_instance.mesh = original_mesh  # Use original mesh (or scaled copy)
 	scene_mesh_instance.name = mesh_name
+
+	if scale_on_node:
+		scene_mesh_instance.scale = Vector3.ONE * config_mesh_scale
 
 	# Determine base output path using current pack folder
 	var meshes_dir := current_pack_folder + "/meshes/" + _get_mesh_subfolder()
