@@ -59,6 +59,7 @@ from material_list import (
     get_custom_shader_materials,
     PrefabMaterials,
 )
+from prefab_parser import build_prefabs_from_package
 
 logger = logging.getLogger(__name__)
 
@@ -2170,6 +2171,22 @@ def run_conversion(config: ConversionConfig) -> ConversionStats:
 
                 logger.debug("Total prefabs from all MaterialList files: %d", len(prefabs))
 
+            # Fall back to the package's prefabs when MaterialList*.txt is
+            # absent or yielded nothing. Synty ships MaterialList*.txt only in
+            # the separate SourceFiles download, never in the .unitypackage,
+            # but prefabs carry the same mesh-to-material data (prefab_parser).
+            if not prefabs:
+                logger.info("No MaterialList data - deriving mappings from package prefabs")
+                prefabs = build_prefabs_from_package(guid_map)
+                logger.info("Derived mappings for %d prefab(s) from package", len(prefabs))
+                if not prefabs:
+                    warning_msg = (
+                        "No MaterialList*.txt and no usable prefabs in package - "
+                        "meshes will have no materials assigned"
+                    )
+                    logger.warning(warning_msg)
+                    stats.warnings.append(warning_msg)
+
             # Determine filtered material names early (before .tres generation)
             filtered_material_names: set[str] | None = None
             if config.filter_pattern and prefabs:
@@ -2178,7 +2195,7 @@ def run_conversion(config: ConversionConfig) -> ConversionStats:
                 )
                 logger.info("Filter limits to %d materials", len(filtered_material_names))
 
-            if material_list_files:
+            if prefabs:
                 # Step 5: Build shader cache with LOD inheritance
                 logger.info("Step 5: Mapping shader properties...")
                 shader_cache, unmatched_materials = build_shader_cache(prefabs)
