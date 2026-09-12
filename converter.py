@@ -2015,6 +2015,38 @@ def filter_textures_for_materials(
     return filtered_textures
 
 
+# Fraction of FBX under an Animations/ directory above which a package is
+# treated as an animation pack. Measured: ANIMATION_Sword_Combat 242/244 = 0.99,
+# POLYGON_Dungeon 0/801 = 0.00, so the separation needs no tuning.
+ANIMATION_PACK_FBX_RATIO = 0.5
+
+
+def detect_pack_type(guid_map) -> str:
+    """Classify a package as an asset pack or an animation pack.
+
+    Args:
+        guid_map: unity_package.GuidMap with guid_to_pathname populated.
+
+    Returns:
+        "animations" or "assets".
+    """
+    fbx_paths = [
+        p for p in guid_map.guid_to_pathname.values() if p.lower().endswith(".fbx")
+    ]
+    if not fbx_paths:
+        return "assets"
+
+    in_animations = sum(1 for p in fbx_paths if "/animations/" in p.lower())
+    ratio = in_animations / len(fbx_paths)
+    logger.debug(
+        "Pack type: %d/%d FBX under Animations/ (ratio %.2f)",
+        in_animations,
+        len(fbx_paths),
+        ratio,
+    )
+    return "animations" if ratio > ANIMATION_PACK_FBX_RATIO else "assets"
+
+
 def run_conversion(config: ConversionConfig) -> ConversionStats:
     """Execute the full conversion pipeline.
 
