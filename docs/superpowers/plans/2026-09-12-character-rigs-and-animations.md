@@ -137,7 +137,9 @@ git commit -m "feat: parse m_IsActive from prefab GameObjects"
   `_NAME_PATTERN`, `_GAME_OBJECT_REF_PATTERN` already in the module.
 - Produces:
   - `@dataclass CharacterDefinition` with fields `name: str`,
-    `source_fbx: str`, `skinned: list[str]`, `attachments: list[str]`
+    `source_fbx: str` (path relative to the pack's `Models/` root, no
+    extension - NOT a basename), `skinned: list[str]`, `attachments: list[str]`
+  - `_models_relative_name(pathname: str) -> str`
   - `build_character_definitions(guid_map) -> dict[str, CharacterDefinition]`
 
 - [ ] **Step 1: Write the failing tests**
@@ -457,7 +459,9 @@ Expected: **33** characters. POLYGON_Dungeon ships 16 characters plus
 `source_fbx` (`Models/FixedScale/Characters.fbx`) and are therefore separate
 definitions. `Character_Goblin_WarChief` has `source_fbx='Characters'`,
 `skinned=['Character_Goblin_WarChief']`,
-`attachments=['SM_Item_Goblin_WarBanner']`.
+`attachments=['SM_Item_Goblin_WarBanner']`. `source_fbx` values split
+16 `Characters` / 16 `FixedScale/Characters` / 1 `SM_LightRayCube`, the last
+being an FX prefab that genuinely uses a SkinnedMeshRenderer.
 
 - [ ] **Step 6: Commit**
 
@@ -880,7 +884,9 @@ through the `else:` static-extraction branch with:
 	var consumed := {}
 	for def_name in character_definitions:
 		var def: Dictionary = character_definitions[def_name]
-		if String(def.get("source_fbx", "")) != fbx_name:
+		# Compare against the path relative to models/, not the basename:
+		# Characters.fbx and FixedScale/Characters.fbx share a basename.
+		if String(def.get("source_fbx", "")) != relative_path.get_basename():
 			continue
 		if not config_filter_pattern.is_empty() and not String(def_name).containsn(config_filter_pattern):
 			continue
