@@ -360,6 +360,9 @@ class ConversionConfig:
         output_subfolder: Optional subfolder path to prepend to pack folder names.
             For example, "synty/" creates packs at output/synty/POLYGON_PackName/
             instead of output/POLYGON_PackName/.
+        animations: Animation libraries to bind to converted characters.
+            None binds nothing, 'all' binds every library in animations/,
+            or a comma-separated list of case-insensitive substrings.
         pack_type: Package kind - 'auto' (default, detected from content),
             'assets' (materials, textures and meshes), or 'animations'
             (clip FBX converted to AnimationLibrary resources).
@@ -397,6 +400,7 @@ class ConversionConfig:
     output_subfolder: str | None = None
     flatten_output: bool = True
     pack_type: str = "auto"
+    animations: str | None = None
 
 
 @dataclass
@@ -591,6 +595,15 @@ Examples:
              "Example: --output-subfolder synty/ creates packs at output/synty/POLYGON_PackName/",
     )
     parser.add_argument(
+        "--animations",
+        default=None,
+        help=(
+            "Bind animation libraries to converted characters. "
+            "'all', or a comma-separated list of substrings "
+            "(e.g. 'sword_combat,base_locomotion')."
+        ),
+    )
+    parser.add_argument(
         "--pack-type",
         choices=["auto", "assets", "animations"],
         default="auto",
@@ -656,6 +669,7 @@ Examples:
         output_subfolder=args.output_subfolder,
         flatten_output=not args.retain_subfolders,
         pack_type=args.pack_type,
+        animations=args.animations,
     )
 
 
@@ -1291,6 +1305,7 @@ def generate_converter_config(
     flatten_output: bool,
     dry_run: bool,
     mode: str = "assets",
+    animation_libraries: list[str] | None = None,
 ) -> None:
     """Generate converter_config.json for Godot's godot_converter.gd script.
 
@@ -1313,6 +1328,8 @@ def generate_converter_config(
         dry_run: If True, only log what would be written.
         mode: 'assets' to convert meshes, 'animations' to build
             AnimationLibrary resources from clip FBX.
+        animation_libraries: res:// paths of AnimationLibrary resources to bind
+            to character scenes.
     """
     config = {
         "pack_name": pack_name,
@@ -1323,6 +1340,7 @@ def generate_converter_config(
         "output_subfolder": output_subfolder,
         "flatten_output": flatten_output,
         "mode": mode,
+        "animation_libraries": animation_libraries or [],
     }
 
     config_path = project_dir / "converter_config.json"
@@ -1348,6 +1366,7 @@ def run_godot_cli(
     output_subfolder: str | None = None,
     flatten_output: bool = True,
     mode: str = "assets",
+    animation_libraries: list[str] | None = None,
 ) -> tuple[bool, bool, bool]:
     """Run Godot CLI in two phases: import and convert.
 
@@ -1445,6 +1464,7 @@ def run_godot_cli(
         flatten_output,
         dry_run,
         mode=mode,
+        animation_libraries=animation_libraries,
     )
 
     import_success = False
@@ -2064,6 +2084,36 @@ def detect_pack_type(guid_map) -> str:
     return "animations" if ratio > ANIMATION_PACK_FBX_RATIO else "assets"
 
 
+def resolve_animation_libraries(project_dir: Path, selector: str | None) -> list[str]:
+    """Resolve --animations selectors to res:// library paths.
+
+    Args:
+        project_dir: Godot project root; libraries live in animations/.
+        selector: None (bind nothing), "all", or a comma-separated list of
+            case-insensitive substrings matched against library filenames.
+
+    Returns:
+        Sorted res:// paths. Empty when nothing matches; the caller warns.
+    """
+    if not selector:
+        return []
+
+    animations_dir = project_dir / "animations"
+    if not animations_dir.is_dir():
+        return []
+
+    libraries = sorted(p.name for p in animations_dir.glob("*.res"))
+    if selector.strip().lower() == "all":
+        matched = libraries
+    else:
+        needles = [s.strip().lower() for s in selector.split(",") if s.strip()]
+        matched = [
+            name for name in libraries if any(n in name.lower() for n in needles)
+        ]
+
+    return [f"res://animations/{name}" for name in matched]
+
+
 def run_conversion(config: ConversionConfig) -> ConversionStats:
     """Execute the full conversion pipeline.
 
@@ -2537,6 +2587,24 @@ def run_conversion(config: ConversionConfig) -> ConversionStats:
             else:
                 full_pack_name = pack_name
 
+            # Resolve requested animation libraries. These live at project root
+            # and are produced by earlier animation-pack conversions, so an
+            # unmatched selector usually means that pack has not been converted.
+            animation_libraries = resolve_animation_libraries(
+                project_dir, config.animations
+            )
+            if config.animations and not animation_libraries:
+                warning_msg = (
+                    f"No animation libraries matched '{config.animations}' "
+                    f"in {project_dir / 'animations'}"
+                )
+                logger.warning(warning_msg)
+                stats.warnings.append(warning_msg)
+            elif animation_libraries:
+                logger.info(
+                    "Binding %d animation library(ies)", len(animation_libraries)
+                )
+
             (
                 stats.godot_import_success,
                 stats.godot_convert_success,
@@ -2555,6 +2623,7 @@ def run_conversion(config: ConversionConfig) -> ConversionStats:
                 output_subfolder=config.output_subfolder,
                 flatten_output=config.flatten_output,
                 mode=pack_mode,
+                animation_libraries=animation_libraries,
             )
 
             # Count generated mesh files

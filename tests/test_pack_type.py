@@ -57,5 +57,54 @@ class TestDetectPackType:
         assert detect_pack_type(_map(paths)) == "assets"
 
 
+
+
+from converter import resolve_animation_libraries  # noqa: E402
+
+
+def _make_libs(tmp_path, names):
+    d = tmp_path / "animations"
+    d.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        (d / n).write_text("stub", encoding="utf-8")
+    return tmp_path
+
+
+class TestResolveAnimationLibraries:
+    LIBS = [
+        "ANIMATION_Sword_Combat_Polygon.res",
+        "ANIMATION_Sword_Combat_Sidekick.res",
+        "ANIMATION_Base_Locomotion_Polygon.res",
+    ]
+
+    def test_none_selects_nothing(self, tmp_path):
+        root = _make_libs(tmp_path, self.LIBS)
+        assert resolve_animation_libraries(root, None) == []
+
+    def test_all_selects_everything(self, tmp_path):
+        root = _make_libs(tmp_path, self.LIBS)
+        assert len(resolve_animation_libraries(root, "all")) == 3
+
+    def test_substring_match_is_case_insensitive(self, tmp_path):
+        root = _make_libs(tmp_path, self.LIBS)
+        got = resolve_animation_libraries(root, "sword_combat")
+        assert sorted(got) == [
+            "res://animations/ANIMATION_Sword_Combat_Polygon.res",
+            "res://animations/ANIMATION_Sword_Combat_Sidekick.res",
+        ]
+
+    def test_multiple_selectors(self, tmp_path):
+        root = _make_libs(tmp_path, self.LIBS)
+        got = resolve_animation_libraries(root, "sword_combat,base_locomotion")
+        assert len(got) == 3
+
+    def test_unmatched_selector_returns_empty(self, tmp_path):
+        root = _make_libs(tmp_path, self.LIBS)
+        assert resolve_animation_libraries(root, "nope") == []
+
+    def test_missing_animations_dir_returns_empty(self, tmp_path):
+        assert resolve_animation_libraries(tmp_path, "all") == []
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
