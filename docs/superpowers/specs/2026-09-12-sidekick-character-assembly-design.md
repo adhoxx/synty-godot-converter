@@ -253,8 +253,8 @@ filters definition names.
 | Condition | Response |
 |---|---|
 | Part has no resolvable FBX | `_report_warning`, skip the part, keep building. Real: 1 of ~34 parts missing in 4 of 10 Fantasy Knights recipes, the part living in another pack. |
-| No part resolves at all | `_report_error`, skip the character. |
-| First part has no `Skeleton3D` | `_report_error`, skip the character. |
+| A part has no `Skeleton3D` to donate | `_report_warning`, try the next part. The skeleton is taken from the first part that has one, so a character is not lost because its first listed slot happens to be a prop. |
+| No part yields any mesh | `_report_error`, skip the character. |
 | No `color_map` for the recipe | `_report_warning`; the character converts untextured. |
 | `materials/<Name>.tres` absent | `_report_warning`; parts keep their FBX materials. |
 
