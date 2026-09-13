@@ -165,6 +165,11 @@ Character_Goblin_WarChief <Node3D>
   AnimationPlayer
 ```
 
+A prefab counts as a character when it has an active `SkinnedMeshRenderer`
+driven by at least 16 bones. The bone threshold matters: Synty skins cloth so
+it moves in the wind, so tent covers, flag lines and FX otherwise register as
+characters - 33 of 52 on POLYGON_Dungeon_Realms.
+
 Which body mesh and which equipment make up a character is read from the Unity
 prefab, which ships with every character in the pack present but all except one
 disabled. That mapping is written to `PACK_NAME/character_definitions.json`.
@@ -205,6 +210,10 @@ and names the missing bones. An unanimated character is recoverable; a silently
 mangled one is not.
 
 Characters built on the canonical rig bind and animate correctly.
+
+Godot's built-in import-time retargeting would remove this limitation
+altogether; it has been measured but not implemented. See
+[the spike note](docs/superpowers/research/2026-09-12-godot-retargeting-spike.md).
 
 ## GUI Features
 

@@ -48,7 +48,7 @@ Two things to know when working on this:
   fall back to whatever `_detect_default_material()` finds. MaterialList.txt is itself generated
   from prefabs, so it would have much the same gap.
 
-Tests: `python -m pytest tests/ -q` (20 tests, no Godot or package needed).
+Tests: `python -m pytest tests/ -q` (72 tests, no Godot or package needed).
 
 ## Quick Commands
 
@@ -104,6 +104,11 @@ synty-converter/
   `BoneAttachment3D` equipment + `AnimationPlayer`, driven by
   `character_definitions.json` derived from Unity prefabs (`m_IsActive` picks the
   one enabled character out of the ~28 in each prefab)
+- **A character needs bones, not just skinning** - Synty skins cloth so it moves
+  in the wind, so "has an active SkinnedMeshRenderer" also matches tents, flag
+  lines and FX. `MIN_CHARACTER_BONES` (16) separates them: FX uses 2 bones and
+  cloth 5, the smallest real rig 48. Without it Realms derived 52 "characters",
+  33 of them bogus
 - **`source_fbx` is a Models-relative path, never a basename** - packs ship both
   `Models/Characters.fbx` and `Models/FixedScale/Characters.fbx`, and matching on
   basename builds every character twice from the wrong source
@@ -111,10 +116,17 @@ synty-converter/
   pose; rigged characters carry scale on the scene root
 - **Animation packs**: auto-detected by `/Animations/` FBX ratio > 0.5, converted
   to `animations/<Pack>_<Family>.res`, bound via `--animations`
+- **The Godot script reports its own errors** via a `GODOT_SUMMARY <json>` line
+  parsed by `parse_godot_summary()`. Everything else it prints is logged at
+  debug level and never seen, so counting without that line means the Python
+  summary can read clean while Godot failed on dozens of meshes. Count and
+  print together through `_report_error` / `_report_warning`, never separately
 - **Binding is refused** on rig-family mismatch, unidentified rigs, or bone
   coverage below 90%. POLYGON_Dungeon's 49-bone variant measures 75% and is
   refused: below-threshold binding collapses the character, because pose tracks
-  apply relative to bone rests. The canonical 52-bone rig binds correctly.
+  apply relative to bone rests. The canonical 52-bone rig binds correctly. Godot's own import-time retargeting
+  would lift this restriction entirely - measured and written up in
+  `docs/superpowers/research/2026-09-12-godot-retargeting-spike.md`, not built.
 
 ### Measured unit scales (POLYGON_Dungeon)
 
