@@ -74,6 +74,26 @@ _MESH_REF_PATTERN = re.compile(
     r"^\s*m_Mesh:\s*\{fileID:\s*-?\d+,\s*guid:\s*([a-f0-9]{32})", re.MULTILINE
 )
 
+# A SkinnedMeshRenderer's bone list, stopped at the first non-entry line.
+_BONES_BLOCK_PATTERN = re.compile(
+    r"^\s*m_Bones:\s*$\n((?:\s*-\s*\{fileID:[^}]*\}\s*$\n?)*)",
+    re.MULTILINE,
+)
+
+# Smallest bone count that counts as a character rig.
+#
+# "Has an active SkinnedMeshRenderer" alone does not mean "is a character":
+# Synty skins cloth so it can move in the wind. On POLYGON_Dungeon_Realms that
+# over-match turns 33 tents, flag lines and FX light rays into character
+# definitions, which then fail in Godot and produce a wall of spurious errors.
+#
+# Bone count separates the two cleanly, with a wide empty gap on both packs
+# measured: FX light rays use 2 bones and every tent or flag line uses 5,
+# while the smallest real character rig uses 49. Anything in between does not
+# occur, so the exact threshold matters little - this one sits in the gap with
+# room for a leaner character rig on some future pack.
+MIN_CHARACTER_BONES = 16
+
 # Trailing _LOD<n> used to order meshes so LOD0 leads.
 _LOD_SUFFIX_PATTERN = re.compile(r"_LOD(\d+)\s*$", re.IGNORECASE)
 
@@ -295,12 +315,16 @@ class CharacterDefinition:
         attachments: Names of active non-skinned meshes (equipment). Whether
             each is bone-attached is left to Godot, which has already built a
             BoneAttachment3D for it during FBX import.
+        bone_count: Bones in the largest active skinned renderer's bone list.
+            Recorded for diagnostics; the gate that uses it is
+            MIN_CHARACTER_BONES.
     """
 
     name: str
     source_fbx: str = ""
     skinned: list[str] = field(default_factory=list)
     attachments: list[str] = field(default_factory=list)
+    bone_count: int = 0
 
 
 def _models_relative_name(pathname: str) -> str:
@@ -339,13 +363,29 @@ def _models_relative_name(pathname: str) -> str:
     return relative
 
 
+def _count_bones(body: str) -> int:
+    """Number of entries in a SkinnedMeshRenderer's m_Bones list."""
+    match = _BONES_BLOCK_PATTERN.search(body)
+    if not match:
+        return 0
+    block = match.group(1).strip()
+    if not block:
+        return 0
+    return len(block.splitlines())
+
+
 def build_character_definitions(guid_map) -> dict[str, CharacterDefinition]:
     """Derive character definitions from the package's prefabs.
 
-    A prefab is a character when it holds at least one *active*
-    SkinnedMeshRenderer. Synty ships one such prefab per character, each
-    containing the whole shared hierarchy with every other character disabled,
-    so the active set is exactly that character's body plus its equipment.
+    A prefab is a character when it holds an *active* SkinnedMeshRenderer
+    driven by at least MIN_CHARACTER_BONES bones. Synty ships one such prefab
+    per character, each containing the whole shared hierarchy with every other
+    character disabled, so the active set is exactly that character's body plus
+    its equipment.
+
+    The bone-count condition is not redundant. Synty also skins cloth - tent
+    covers, flag lines, FX light rays - so an active SkinnedMeshRenderer on its
+    own matches far more than characters.
 
     Args:
         guid_map: unity_package.GuidMap with guid_to_pathname and
@@ -356,6 +396,7 @@ def build_character_definitions(guid_map) -> dict[str, CharacterDefinition]:
     """
     prefab_content = getattr(guid_map, "guid_to_prefab_content", None) or {}
     definitions: dict[str, CharacterDefinition] = {}
+    skipped_low_bone_count = 0
 
     for guid, content in prefab_content.items():
         pathname = guid_map.guid_to_pathname.get(guid, "")
@@ -385,6 +426,7 @@ def build_character_definitions(guid_map) -> dict[str, CharacterDefinition]:
         skinned: list[str] = []
         attachments: list[str] = []
         mesh_guid = ""
+        bone_count = 0
 
         for class_id, _anchor, body in documents:
             if class_id not in _RENDERER_CLASSES:
@@ -397,6 +439,7 @@ def build_character_definitions(guid_map) -> dict[str, CharacterDefinition]:
                 continue
             if class_id == _CLASS_SKINNED_MESH_RENDERER:
                 skinned.append(name)
+                bone_count = max(bone_count, _count_bones(body))
                 if not mesh_guid:
                     mesh_match = _MESH_REF_PATTERN.search(body)
                     if mesh_match:
@@ -407,6 +450,17 @@ def build_character_definitions(guid_map) -> dict[str, CharacterDefinition]:
         if not skinned:
             continue
 
+        if bone_count < MIN_CHARACTER_BONES:
+            logger.debug(
+                "Skipping '%s': %d bone(s), below the %d needed for a character "
+                "rig (skinned cloth or FX, not a character)",
+                prefab_name,
+                bone_count,
+                MIN_CHARACTER_BONES,
+            )
+            skipped_low_bone_count += 1
+            continue
+
         source_fbx = _models_relative_name(guid_map.guid_to_pathname.get(mesh_guid, ""))
 
         definitions[prefab_name] = CharacterDefinition(
@@ -414,8 +468,15 @@ def build_character_definitions(guid_map) -> dict[str, CharacterDefinition]:
             source_fbx=source_fbx,
             skinned=skinned,
             attachments=attachments,
+            bone_count=bone_count,
         )
 
+    if skipped_low_bone_count:
+        logger.debug(
+            "Skipped %d skinned prefab(s) with fewer than %d bones (cloth/FX)",
+            skipped_low_bone_count,
+            MIN_CHARACTER_BONES,
+        )
     logger.debug("Derived %d character definition(s)", len(definitions))
     return definitions
 
@@ -438,6 +499,7 @@ def write_character_definitions_json(
             "source_fbx": d.source_fbx,
             "skinned": d.skinned,
             "attachments": d.attachments,
+            "bone_count": d.bone_count,
         }
         for name, d in definitions.items()
     }

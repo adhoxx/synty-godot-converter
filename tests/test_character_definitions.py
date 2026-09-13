@@ -8,6 +8,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from prefab_parser import (  # noqa: E402
+    MIN_CHARACTER_BONES,
     CharacterDefinition,
     build_character_definitions,
 )
@@ -17,28 +18,41 @@ def _prefab(body: str) -> bytes:
     return ("%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n" + body).encode("utf-8")
 
 
+def _bones(count: int, *, indent: str = "  ") -> str:
+    """An m_Bones block with `count` entries, as Unity serialises it."""
+    lines = [f"{indent}m_Bones:"]
+    lines += [f"{indent}- {{fileID: {9000 + i}}}" for i in range(count)]
+    return "\n".join(lines)
+
+
+# A rig comfortably above the cloth/FX cutoff. Real Synty character rigs are
+# 49-52 bones; cloth is 5 and FX is 2.
+CHARACTER_BONES = 50
+
+
 # One active skinned character plus one active bone-attached item, and one
 # disabled sibling character - the shape every Synty character prefab has.
 WARCHIEF = _prefab(
-    """--- !u!1 &100
+    f"""--- !u!1 &100
 GameObject:
   m_Name: Character_Goblin_WarChief
   m_IsActive: 1
 --- !u!137 &101
 SkinnedMeshRenderer:
-  m_GameObject: {fileID: 100}
+  m_GameObject: {{fileID: 100}}
   m_Materials:
-  - {fileID: 2100000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 2}
-  m_Mesh: {fileID: 4300072, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}
+  - {{fileID: 2100000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 2}}
+{_bones(CHARACTER_BONES)}
+  m_Mesh: {{fileID: 4300072, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}}
 --- !u!1 &200
 GameObject:
   m_Name: SM_Item_Goblin_WarBanner
   m_IsActive: 1
 --- !u!23 &201
 MeshRenderer:
-  m_GameObject: {fileID: 200}
+  m_GameObject: {{fileID: 200}}
   m_Materials:
-  - {fileID: 2100000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 2}
+  - {{fileID: 2100000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 2}}
   m_StaticBatchInfo:
     firstSubMesh: 0
 --- !u!1 &300
@@ -47,10 +61,11 @@ GameObject:
   m_IsActive: 0
 --- !u!137 &301
 SkinnedMeshRenderer:
-  m_GameObject: {fileID: 300}
+  m_GameObject: {{fileID: 300}}
   m_Materials:
-  - {fileID: 2100000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 2}
-  m_Mesh: {fileID: 4300050, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}
+  - {{fileID: 2100000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 2}}
+{_bones(CHARACTER_BONES)}
+  m_Mesh: {{fileID: 4300050, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}}
 """
 )
 
@@ -119,15 +134,17 @@ class TestBuildCharacterDefinitions:
         assert build_character_definitions(_guid_map({"pb": BARREL})) == {}
 
     def test_ignores_prefab_whose_only_skinned_mesh_is_disabled(self):
+        """Bones are present and plentiful - being disabled is the reason."""
         data = _prefab(
-            """--- !u!1 &300
+            f"""--- !u!1 &300
 GameObject:
   m_Name: Character_Skeleton_Knight
   m_IsActive: 0
 --- !u!137 &301
 SkinnedMeshRenderer:
-  m_GameObject: {fileID: 300}
-  m_Mesh: {fileID: 4300050, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}
+  m_GameObject: {{fileID: 300}}
+{_bones(CHARACTER_BONES)}
+  m_Mesh: {{fileID: 4300050, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}}
 """
         )
         assert build_character_definitions(_guid_map({"pw": data})) == {}
@@ -137,14 +154,15 @@ SkinnedMeshRenderer:
 
     def test_unresolvable_mesh_guid_yields_empty_source_fbx(self):
         data = _prefab(
-            """--- !u!1 &1
+            f"""--- !u!1 &1
 GameObject:
   m_Name: Character_Mystery
   m_IsActive: 1
 --- !u!137 &2
 SkinnedMeshRenderer:
-  m_GameObject: {fileID: 1}
-  m_Mesh: {fileID: 1, guid: ffffffffffffffffffffffffffffffff, type: 3}
+  m_GameObject: {{fileID: 1}}
+{_bones(CHARACTER_BONES)}
+  m_Mesh: {{fileID: 1, guid: ffffffffffffffffffffffffffffffff, type: 3}}
 """
         )
         defs = build_character_definitions(_guid_map({"pm": data}))
@@ -166,6 +184,75 @@ SkinnedMeshRenderer:
     def test_source_fbx_has_no_prefix_for_top_level_fbx(self):
         defs = build_character_definitions(_guid_map({"pw": WARCHIEF}))
         assert defs["Character_Goblin_WarChief"].source_fbx == "Characters"
+
+    def test_records_bone_count(self):
+        defs = build_character_definitions(_guid_map({"pw": WARCHIEF}))
+        assert defs["Character_Goblin_WarChief"].bone_count == CHARACTER_BONES
+
+    def test_ignores_skinned_cloth(self):
+        """Synty skins tent covers and flag lines so they move in the wind.
+
+        On POLYGON_Dungeon_Realms this over-match produced 33 bogus character
+        definitions out of 52 - every one of which then failed in Godot.
+        """
+        data = _prefab(
+            f"""--- !u!1 &1
+GameObject:
+  m_Name: SM_Bld_Camp_Tent_01
+  m_IsActive: 1
+--- !u!137 &2
+SkinnedMeshRenderer:
+  m_GameObject: {{fileID: 1}}
+{_bones(5)}
+  m_Mesh: {{fileID: 4300072, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}}
+"""
+        )
+        assert build_character_definitions(_guid_map({"pm": data})) == {}
+
+    def test_ignores_skinned_renderer_with_no_bone_list(self):
+        data = _prefab(
+            """--- !u!1 &1
+GameObject:
+  m_Name: Character_Mystery
+  m_IsActive: 1
+--- !u!137 &2
+SkinnedMeshRenderer:
+  m_GameObject: {fileID: 1}
+  m_Mesh: {fileID: 4300072, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}
+"""
+        )
+        assert build_character_definitions(_guid_map({"pm": data})) == {}
+
+    def test_bone_count_threshold_is_inclusive(self):
+        data = _prefab(
+            f"""--- !u!1 &1
+GameObject:
+  m_Name: Character_Mystery
+  m_IsActive: 1
+--- !u!137 &2
+SkinnedMeshRenderer:
+  m_GameObject: {{fileID: 1}}
+{_bones(MIN_CHARACTER_BONES)}
+  m_Mesh: {{fileID: 4300072, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}}
+"""
+        )
+        defs = build_character_definitions(_guid_map({"pm": data}))
+        assert defs["Character_Mystery"].bone_count == MIN_CHARACTER_BONES
+
+    def test_one_bone_below_threshold_is_rejected(self):
+        data = _prefab(
+            f"""--- !u!1 &1
+GameObject:
+  m_Name: Character_Mystery
+  m_IsActive: 1
+--- !u!137 &2
+SkinnedMeshRenderer:
+  m_GameObject: {{fileID: 1}}
+{_bones(MIN_CHARACTER_BONES - 1)}
+  m_Mesh: {{fileID: 4300072, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}}
+"""
+        )
+        assert build_character_definitions(_guid_map({"pm": data})) == {}
 
     def test_definition_is_a_dataclass_with_expected_fields(self):
         d = CharacterDefinition(
@@ -194,6 +281,7 @@ class TestWriteCharacterDefinitionsJson:
                 "source_fbx": "Characters",
                 "skinned": ["Character_Goblin_WarChief"],
                 "attachments": ["SM_Item_Goblin_WarBanner"],
+                "bone_count": CHARACTER_BONES,
             }
         }
 
