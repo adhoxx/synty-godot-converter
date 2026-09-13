@@ -404,6 +404,93 @@ class ConversionConfig:
 
 
 @dataclass
+class GodotRunReport:
+    """What godot_converter.gd reported about its own run.
+
+    Everything the Godot script prints goes to a pipe that run_godot_cli()
+    logs at debug level, so on a normal run none of it reaches the user. The
+    script therefore ends with a machine-readable ``GODOT_SUMMARY <json>``
+    line, and this holds what that line said.
+
+    Attributes:
+        seen: True if the GODOT_SUMMARY line was found. When False every count
+            below is zero because nothing was parsed, not because nothing
+            happened - so do not report them.
+        meshes_saved: Meshes written by the Godot script.
+        meshes_skipped: Meshes skipped (null mesh, no surfaces).
+        characters_saved: Rigged character scenes written.
+        animations_bound: Characters that got an animation library bound.
+        errors: Errors counted by the Godot script.
+        warnings: Warnings counted by the Godot script.
+        messages: Up to MAX_GODOT_MESSAGES error and warning texts, reported by
+            the Godot script itself rather than scraped from its console
+            output. Scraping cannot work: the engine's own messages are worded
+            exactly like the script's, so a text match quotes engine noise as
+            though it were one of the counts above.
+    """
+
+    seen: bool = False
+    meshes_saved: int = 0
+    meshes_skipped: int = 0
+    characters_saved: int = 0
+    animations_bound: int = 0
+    errors: int = 0
+    warnings: int = 0
+    messages: list[str] = field(default_factory=list)
+
+
+# Cap on message examples accepted from the Godot script, mirroring its own
+# MAX_REPORTED_MESSAGES. Enforced here too: the summary line is parsed input,
+# not something to trust for length.
+MAX_GODOT_MESSAGES = 25
+
+
+def parse_godot_summary(line: str, report: GodotRunReport) -> bool:
+    """Fill `report` from a GODOT_SUMMARY line.
+
+    Args:
+        line: A single line of Godot output.
+        report: Report to populate in place.
+
+    Returns:
+        True if the line was a well-formed GODOT_SUMMARY line.
+    """
+    stripped = line.strip()
+    if not stripped.startswith("GODOT_SUMMARY "):
+        return False
+
+    try:
+        data = json.loads(stripped[len("GODOT_SUMMARY ") :])
+    except (json.JSONDecodeError, ValueError):
+        logger.debug("Malformed GODOT_SUMMARY line: %s", stripped)
+        return False
+    if not isinstance(data, dict):
+        return False
+
+    for name in (
+        "meshes_saved",
+        "meshes_skipped",
+        "characters_saved",
+        "animations_bound",
+        "errors",
+        "warnings",
+    ):
+        value = data.get(name, 0)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        setattr(report, name, int(value))
+
+    messages = data.get("messages")
+    if isinstance(messages, list):
+        report.messages = [
+            str(message) for message in messages[:MAX_GODOT_MESSAGES]
+        ]
+
+    report.seen = True
+    return True
+
+
+@dataclass
 class ConversionStats:
     """Statistics collected during the conversion pipeline.
 
@@ -468,6 +555,7 @@ class ConversionStats:
     godot_timeout_occurred: bool = False
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    godot_report: GodotRunReport = field(default_factory=lambda: GodotRunReport())
 
 
 def parse_args() -> ConversionConfig:
@@ -1367,7 +1455,7 @@ def run_godot_cli(
     flatten_output: bool = True,
     mode: str = "assets",
     animation_libraries: list[str] | None = None,
-) -> tuple[bool, bool, bool]:
+) -> tuple[bool, bool, bool, GodotRunReport]:
     """Run Godot CLI in two phases: import and convert.
 
     This function orchestrates the Godot CLI operations needed to import
@@ -1416,12 +1504,15 @@ def run_godot_cli(
           if Phase 1 was skipped via skip_import
         - convert_success: True if Phase 2 completed with exit code 0
         - timeout_occurred: True if either phase exceeded the timeout
+        - report: GodotRunReport of what godot_converter.gd said about its own
+          run. Its `seen` flag is False when the run never reached the
+          converter script.
 
     Raises:
         No exceptions are raised; errors are logged and reflected in return values.
 
     Example:
-        >>> import_ok, convert_ok, timed_out = run_godot_cli(
+        >>> import_ok, convert_ok, timed_out, report = run_godot_cli(
         ...     Path("C:/Godot/Godot.exe"),
         ...     Path("output"),
         ...     timeout_seconds=300,
@@ -1432,12 +1523,12 @@ def run_godot_cli(
     """
     if not godot_exe.exists():
         logger.error("Godot executable not found: %s", godot_exe)
-        return False, False, False
+        return False, False, False, GodotRunReport()
 
     project_godot = project_dir / "project.godot"
     if not project_godot.exists():
         logger.error("project.godot not found in: %s", project_dir)
-        return False, False, False
+        return False, False, False, GodotRunReport()
 
     # Copy godot_converter.gd to project directory
     script_dir = Path(__file__).parent
@@ -1470,6 +1561,7 @@ def run_godot_cli(
     import_success = False
     convert_success = False
     timeout_occurred = False
+    report = GodotRunReport()
 
     # Phase 1: Import (can be skipped for large projects that timeout)
     if skip_import:
@@ -1533,17 +1625,17 @@ def run_godot_cli(
                     process.kill()
                     logger.error("Godot import timed out after %ds", timeout_seconds)
                     timeout_occurred = True
-                    return import_success, convert_success, timeout_occurred
+                    return import_success, convert_success, timeout_occurred, report
                 finally:
                     if process.stdout:
                         process.stdout.close()
 
             except Exception as e:
                 logger.error("Failed to run Godot import: %s", e)
-                return import_success, convert_success, timeout_occurred
+                return import_success, convert_success, timeout_occurred, report
 
         if not import_success and not dry_run:
-            return import_success, convert_success, timeout_occurred
+            return import_success, convert_success, timeout_occurred, report
 
     # Phase 2: Convert
     convert_cmd = [
@@ -1577,6 +1669,9 @@ def run_godot_cli(
                 for line in process.stdout:
                     line = line.rstrip()
                     if line:
+                        if parse_godot_summary(line, report):
+                            logger.debug(line)
+                            continue
                         if "[" in line and "Processing:" in line:
                             # Extract [X/Y] from the processing line for compact display
                             # Pattern: "[1/830] Processing: Character_Ghost_01.fbx"
@@ -1613,7 +1708,7 @@ def run_godot_cli(
         except Exception as e:
             logger.error("Failed to run Godot converter: %s", e)
 
-    return import_success, convert_success, timeout_occurred
+    return import_success, convert_success, timeout_occurred, report
 
 
 def count_mesh_files(meshes_dir: Path, mesh_format: str = "tscn") -> int:
@@ -1865,6 +1960,28 @@ def write_conversion_log(project_dir: Path, pack_name: str, stats: ConversionSta
         "",
     ]
 
+    # The Godot script's own tally, which is independent of the Python one
+    # above: the pipeline can succeed while the converter script fails on
+    # individual meshes or characters.
+    report = stats.godot_report
+    if report.seen:
+        lines.extend(
+            [
+                "Godot Converter Script:",
+                f"  Meshes Saved: {report.meshes_saved}",
+                f"  Meshes Skipped: {report.meshes_skipped}",
+                f"  Characters Rigged: {report.characters_saved}",
+                f"  Animations Bound: {report.animations_bound}",
+                f"  Warnings: {report.warnings}",
+                f"  Errors: {report.errors}",
+                "",
+            ]
+        )
+        if report.messages:
+            lines.append("Godot Messages:")
+            lines.extend(f"  - {message}" for message in report.messages)
+            lines.append("")
+
     if stats.warnings:
         lines.append(f"Warnings ({len(stats.warnings)}):")
         for warning in stats.warnings:
@@ -1915,6 +2032,22 @@ def print_summary(stats: ConversionStats) -> None:
     elif not stats.godot_convert_success and stats.meshes_converted == 0:
         print("  Godot CLI: Conversion Failed")
 
+    # What the Godot script reported about itself. Its errors are counted
+    # separately from the Python pipeline's: a run can finish with Python
+    # reporting nothing wrong while Godot failed on dozens of meshes.
+    report = stats.godot_report
+    if report.seen:
+        if report.characters_saved:
+            print(f"  Characters: {report.characters_saved} rigged")
+        if report.animations_bound:
+            print(f"  Animations bound: {report.animations_bound}")
+        if report.meshes_skipped:
+            print(f"  Meshes Skipped (Godot): {report.meshes_skipped}")
+        if report.warnings:
+            print(f"  Godot Warnings: {report.warnings}")
+        if report.errors:
+            print(f"  Godot Errors: {report.errors}")
+
     if stats.warnings:
         print(f"  Warnings: {len(stats.warnings)}")
 
@@ -1924,6 +2057,14 @@ def print_summary(stats: ConversionStats) -> None:
             print(f"    - {error}")
         if len(stats.errors) > 5:
             print(f"    ... and {len(stats.errors) - 5} more")
+
+    if report.messages and (report.errors or report.warnings):
+        print("  From Godot:")
+        for message in report.messages[:5]:
+            print(f"    - {message}")
+        remaining = (report.errors + report.warnings) - 5
+        if remaining > 0:
+            print(f"    ... and {remaining} more (run with --verbose for all)")
 
     print()  # Empty line at end
 
@@ -2609,6 +2750,7 @@ def run_conversion(config: ConversionConfig) -> ConversionStats:
                 stats.godot_import_success,
                 stats.godot_convert_success,
                 stats.godot_timeout_occurred,
+                stats.godot_report,
             ) = run_godot_cli(
                 config.godot_exe,
                 project_dir,

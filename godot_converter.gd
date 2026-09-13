@@ -60,6 +60,14 @@ var warnings: int = 0
 ## Counter for errors that prevented mesh conversion.
 var errors: int = 0
 
+## Most recent error and warning texts, carried out in GODOT_SUMMARY so
+## converter.py can show examples without scraping the console.
+var reported_messages: PackedStringArray = PackedStringArray()
+
+## Cap on reported_messages. A pack where every character fails would
+## otherwise put thousands of lines through the summary line.
+const MAX_REPORTED_MESSAGES := 25
+
 ## Magenta material applied to collision meshes for debugging visibility.
 ## Collision meshes are identified by name containing "collision" or ending with "_col".
 var collision_material: StandardMaterial3D = null
@@ -440,14 +448,12 @@ func _bind_animation_libraries(player: AnimationPlayer, skel: Skeleton3D) -> voi
 	for lib_path in config_animation_libraries:
 		var path := String(lib_path)
 		if not ResourceLoader.exists(path):
-			printerr("      WARNING: animation library not found: %s" % path)
-			warnings += 1
+			_report_warning("      WARNING: animation library not found: %s" % path)
 			continue
 
 		var library := load(path) as AnimationLibrary
 		if library == null:
-			printerr("      WARNING: not an AnimationLibrary: %s" % path)
-			warnings += 1
+			_report_warning("      WARNING: not an AnimationLibrary: %s" % path)
 			continue
 
 		# Family is encoded in the filename by process_animation_pack().
@@ -461,15 +467,13 @@ func _bind_animation_libraries(player: AnimationPlayer, skel: Skeleton3D) -> voi
 		# "Unknown" on either side means a rig we could not identify. Matching
 		# two unknowns is not evidence they are the same rig, so refuse both.
 		if library_family == "Unknown" or character_family == "Unknown":
-			printerr("      Refusing %s: unidentified rig (library=%s, character=%s)" % [
+			_report_warning("      Refusing %s: unidentified rig (library=%s, character=%s)" % [
 				path.get_file(), library_family, character_family])
-			warnings += 1
 			continue
 
 		if library_family != character_family:
-			printerr("      Refusing %s: library rig is %s, character rig is %s" % [
+			_report_warning("      Refusing %s: library rig is %s, character rig is %s" % [
 				path.get_file(), library_family, character_family])
-			warnings += 1
 			continue
 
 		var report := _animation_bone_coverage(skel, library)
@@ -481,11 +485,10 @@ func _bind_animation_libraries(player: AnimationPlayer, skel: Skeleton3D) -> voi
 			# rests differ. An unanimated character is recoverable; a silently
 			# mangled one is not. Refuse, and say exactly why.
 			var missing: Array = report["missing"]
-			printerr("      Refusing %s: only %.0f%% bone coverage (need %.0f%%); missing: %s" % [
+			_report_warning("      Refusing %s: only %.0f%% bone coverage (need %.0f%%); missing: %s" % [
 				path.get_file(), coverage * 100.0, MIN_BONE_COVERAGE * 100.0,
 				str(missing.slice(0, 8))])
 			printerr("        This character uses a rig variant the clips were not authored for.")
-			warnings += 1
 			continue
 
 		player.add_animation_library(base, library)
@@ -607,12 +610,10 @@ func process_animation_pack(pack_folder: String) -> void:
 			if family == "Unknown":
 				# Saved so the clips are not lost, but binding refuses any
 				# family it cannot identify, so this file can never attach.
-				printerr("  WARNING: %d clip(s) had an unrecognised rig and cannot be bound" % clip_counts[family])
-				warnings += 1
+				_report_warning("  WARNING: %d clip(s) had an unrecognised rig and cannot be bound" % clip_counts[family])
 			meshes_saved += 1
 		else:
-			printerr("  ERROR: failed to save %s" % out_path)
-			errors += 1
+			_report_error("  ERROR: failed to save %s" % out_path)
 
 	if skipped > 0:
 		print("  Skipped %d clip(s) with no AnimationPlayer" % skipped)
@@ -718,15 +719,13 @@ func process_fbx_file(fbx_path: String) -> void:
 	# Load the FBX as a PackedScene
 	var packed_scene: PackedScene = load(fbx_path)
 	if packed_scene == null:
-		printerr("    ERROR: Failed to load FBX: %s" % fbx_path)
-		errors += 1
+		_report_error("    ERROR: Failed to load FBX: %s" % fbx_path)
 		return
 
 	# Instantiate the scene to traverse it
 	var scene_instance: Node = packed_scene.instantiate()
 	if scene_instance == null:
-		printerr("    ERROR: Failed to instantiate scene: %s" % fbx_path)
-		errors += 1
+		_report_error("    ERROR: Failed to instantiate scene: %s" % fbx_path)
 		return
 
 	# Find all MeshInstance3D nodes
@@ -815,14 +814,12 @@ func save_fbx_as_single_scene(scene_root: Node, mesh_instances: Array[MeshInstan
 				var material_path := find_material_path(mat_name, materials_dir)
 
 				if material_path.is_empty():
-					print("      Warning: Material not found: %s" % mat_name)
-					warnings += 1
+					_report_warning("      Warning: Material not found: %s" % mat_name)
 					continue
 
 				var material: Material = load(material_path)
 				if material == null:
-					print("      Warning: Failed to load material: %s" % material_path)
-					warnings += 1
+					_report_warning("      Warning: Failed to load material: %s" % material_path)
 					continue
 
 				mesh_instance.set_surface_override_material(i, material)
@@ -887,23 +884,21 @@ func save_fbx_as_single_scene(scene_root: Node, mesh_instances: Array[MeshInstan
 		var pack_result := scene.pack(new_root)
 
 		if pack_result != OK:
-			printerr("      ERROR: Failed to pack scene: %s (error: %s)" % [
+			_report_error("      ERROR: Failed to pack scene: %s (error: %s)" % [
 				output_path,
 				error_string(pack_result)
 			])
 			new_root.free()
-			errors += 1
 			return
 
 		save_result = ResourceSaver.save(scene, output_path)
 		new_root.free()
 
 	if save_result != OK:
-		printerr("      ERROR: Failed to save: %s (error: %s)" % [
+		_report_error("      ERROR: Failed to save: %s (error: %s)" % [
 			output_path,
 			error_string(save_result)
 		])
-		errors += 1
 		return
 
 	print("      Saved combined: %s (%d meshes, %d materials)" % [
@@ -1035,9 +1030,8 @@ func extract_and_save_mesh(mesh_instance: MeshInstance3D, relative_dir: String, 
 			var scene := PackedScene.new()
 			var pack_result := scene.pack(scene_mesh_instance)
 			if pack_result != OK:
-				printerr("      ERROR: Failed to pack collision scene: %s" % mesh_name)
+				_report_error("      ERROR: Failed to pack collision scene: %s" % mesh_name)
 				scene_mesh_instance.free()
-				errors += 1
 				return
 			save_result = ResourceSaver.save(scene, output_path)
 			scene_mesh_instance.free()
@@ -1046,8 +1040,7 @@ func extract_and_save_mesh(mesh_instance: MeshInstance3D, relative_dir: String, 
 			print("      Saved collision: %s (green wireframe)" % mesh_name)
 			meshes_saved += 1
 		else:
-			printerr("      ERROR: Failed to save collision: %s" % mesh_name)
-			errors += 1
+			_report_error("      ERROR: Failed to save collision: %s" % mesh_name)
 		return  # Skip normal material lookup
 
 	# Get materials for this mesh (loaded as external resources)
@@ -1064,14 +1057,12 @@ func extract_and_save_mesh(mesh_instance: MeshInstance3D, relative_dir: String, 
 			var material_path := find_material_path(mat_name, materials_dir)
 
 			if material_path.is_empty():
-				print("      Warning: Material not found: %s (tried fallbacks)" % mat_name)
-				warnings += 1
+				_report_warning("      Warning: Material not found: %s (tried fallbacks)" % mat_name)
 				continue
 
 			var material: Material = load(material_path)
 			if material == null:
-				print("      Warning: Failed to load material: %s" % material_path)
-				warnings += 1
+				_report_warning("      Warning: Failed to load material: %s" % material_path)
 				continue
 
 			scene_mesh_instance.set_surface_override_material(i, material)
@@ -1085,8 +1076,7 @@ func extract_and_save_mesh(mesh_instance: MeshInstance3D, relative_dir: String, 
 			output_path = "%s/%s%s" % [meshes_dir, unique_name, file_ext]
 		else:
 			output_path = "%s/%s/%s%s" % [meshes_dir, relative_dir, unique_name, file_ext]
-		print("      Note: Renamed to %s (duplicate name)" % unique_name)
-		warnings += 1
+		_report_warning("      Note: Renamed to %s (duplicate name)" % unique_name)
 
 	# Ensure output directory exists
 	var output_dir := output_path.get_base_dir()
@@ -1112,23 +1102,21 @@ func extract_and_save_mesh(mesh_instance: MeshInstance3D, relative_dir: String, 
 		var pack_result := scene.pack(scene_mesh_instance)
 
 		if pack_result != OK:
-			printerr("      ERROR: Failed to pack scene: %s (error: %s)" % [
+			_report_error("      ERROR: Failed to pack scene: %s (error: %s)" % [
 				output_path,
 				error_string(pack_result)
 			])
 			scene_mesh_instance.free()
-			errors += 1
 			return
 
 		save_result = ResourceSaver.save(scene, output_path)
 		scene_mesh_instance.free()
 
 	if save_result != OK:
-		printerr("      ERROR: Failed to save: %s (error: %s)" % [
+		_report_error("      ERROR: Failed to save: %s (error: %s)" % [
 			output_path,
 			error_string(save_result)
 		])
-		errors += 1
 		return
 
 	# Track saved mesh name
@@ -1158,8 +1146,7 @@ func extract_and_save_mesh(mesh_instance: MeshInstance3D, relative_dir: String, 
 func build_character_scene(scene_instance: Node, def_name: String, def: Dictionary, relative_dir: String) -> bool:
 	var src_skel := _find_skeleton(scene_instance)
 	if src_skel == null:
-		printerr("    ERROR: %s has no Skeleton3D; falling back to static meshes" % def_name)
-		errors += 1
+		_report_error("    ERROR: %s has no Skeleton3D; falling back to static meshes" % def_name)
 		return false
 
 	character_placed_meshes = []
@@ -1169,9 +1156,8 @@ func build_character_scene(scene_instance: Node, def_name: String, def: Dictiona
 
 	var skel := src_skel.duplicate() as Skeleton3D
 	if skel == null:
-		printerr("    ERROR: could not duplicate skeleton for %s" % def_name)
+		_report_error("    ERROR: could not duplicate skeleton for %s" % def_name)
 		root.free()
-		errors += 1
 		return false
 	for child in skel.get_children():
 		skel.remove_child(child)
@@ -1184,14 +1170,12 @@ func build_character_scene(scene_instance: Node, def_name: String, def: Dictiona
 	for mesh_name in def.get("skinned", []):
 		var src := _find_node_named(scene_instance, String(mesh_name)) as MeshInstance3D
 		if src == null or src.mesh == null:
-			printerr("    WARNING: skinned mesh %s not found in FBX" % mesh_name)
-			warnings += 1
+			_report_warning("    WARNING: skinned mesh %s not found in FBX" % mesh_name)
 			continue
 		if src.skin == null:
 			# A skinned mesh with no Skin cannot be posed. Leave it to the
 			# static path rather than emitting a character that cannot animate.
-			printerr("    WARNING: %s has no Skin; leaving it as a static mesh" % mesh_name)
-			warnings += 1
+			_report_warning("    WARNING: %s has no Skin; leaving it as a static mesh" % mesh_name)
 			continue
 		var mi := src.duplicate() as MeshInstance3D
 		skel.add_child(mi)
@@ -1205,8 +1189,7 @@ func build_character_scene(scene_instance: Node, def_name: String, def: Dictiona
 	for item_name in def.get("attachments", []):
 		var src_item := _find_node_named(scene_instance, String(item_name))
 		if src_item == null:
-			printerr("    WARNING: attachment %s not found in FBX" % item_name)
-			warnings += 1
+			_report_warning("    WARNING: attachment %s not found in FBX" % item_name)
 			continue
 		# Godot's importer wraps bone-attached objects in a BoneAttachment3D.
 		# Duplicating that parent preserves bone_name; if the item is not
@@ -1222,9 +1205,8 @@ func build_character_scene(scene_instance: Node, def_name: String, def: Dictiona
 		attached += 1
 
 	if attached == 0:
-		printerr("    ERROR: %s produced no meshes; falling back to static" % def_name)
+		_report_error("    ERROR: %s produced no meshes; falling back to static" % def_name)
 		root.free()
-		errors += 1
 		return false
 
 	var player := AnimationPlayer.new()
@@ -1251,17 +1233,15 @@ func build_character_scene(scene_instance: Node, def_name: String, def: Dictiona
 
 	var scene := PackedScene.new()
 	if scene.pack(root) != OK:
-		printerr("    ERROR: failed to pack character scene: %s" % def_name)
+		_report_error("    ERROR: failed to pack character scene: %s" % def_name)
 		root.free()
-		errors += 1
 		return false
 
 	var save_result := ResourceSaver.save(scene, output_path)
 	root.free()
 
 	if save_result != OK:
-		printerr("    ERROR: failed to save character scene: %s" % def_name)
-		errors += 1
+		_report_error("    ERROR: failed to save character scene: %s" % def_name)
 		return false
 
 	print("      Saved character: %s (%d bones)" % [def_name, bone_count])
@@ -1331,8 +1311,7 @@ func get_material_names_for_mesh(mesh_name: String) -> Array[String]:
 				material_names_result.append(default_material_name)
 				return material_names_result
 			else:
-				print("      Warning: No material mapping for mesh '%s'" % mesh_name)
-				warnings += 1
+				_report_warning("      Warning: No material mapping for mesh '%s'" % mesh_name)
 				return material_names_result
 
 	var material_names = mesh_to_materials[lookup_name]
@@ -1342,8 +1321,7 @@ func get_material_names_for_mesh(mesh_name: String) -> Array[String]:
 		material_names = [material_names]
 
 	if not material_names is Array:
-		print("      Warning: Invalid material format for mesh '%s'" % lookup_name)
-		warnings += 1
+		_report_warning("      Warning: Invalid material format for mesh '%s'" % lookup_name)
 		return material_names_result
 
 	# Collect material names
@@ -1777,6 +1755,35 @@ func _ensure_directory_exists(dir_path: String) -> void:
 		])
 
 
+## Reports an error: counts it, keeps the text, and prints it.
+##
+## Counting and printing used to be separate statements at ~30 call sites,
+## which made it easy to print without counting. Routing both through here
+## also lets GODOT_SUMMARY carry the text: converter.py cannot tell this
+## script's "ERROR:" lines from the engine's by wording alone, so scraping the
+## console made it quote engine noise as though it were one of these.
+## @param message Text to print, already formatted and indented.
+func _report_error(message: String) -> void:
+	errors += 1
+	_record_message(message)
+	printerr(message)
+
+
+## Reports a non-fatal warning. See _report_error.
+## @param message Text to print, already formatted and indented.
+func _report_warning(message: String) -> void:
+	warnings += 1
+	_record_message(message)
+	printerr(message)
+
+
+## Keeps a message for GODOT_SUMMARY, up to MAX_REPORTED_MESSAGES.
+## @param message Text to keep; leading indentation is trimmed.
+func _record_message(message: String) -> void:
+	if reported_messages.size() < MAX_REPORTED_MESSAGES:
+		reported_messages.append(message.strip_edges())
+
+
 ## Prints a summary of the conversion process.
 ## Shows counts of saved meshes, skipped meshes, warnings, and errors.
 ## Provides a final status message based on results.
@@ -1799,6 +1806,22 @@ func print_summary() -> void:
 	print("  Warnings:       %d" % warnings)
 	print("  Errors:         %d" % errors)
 	print("=" .repeat(60))
+
+	# Machine-readable duplicate of the block above, parsed by converter.py's
+	# print_summary(). Without it the Python side reports "Warnings: 1" on a run
+	# where this script logged dozens of errors: everything printed here lands
+	# on a pipe that converter.py logs at debug level and never inspects, so a
+	# non-verbose run shows nothing. The text block is for people; this line is
+	# the contract. Keep the key names stable.
+	print("GODOT_SUMMARY %s" % JSON.stringify({
+		"meshes_saved": meshes_saved,
+		"meshes_skipped": meshes_skipped,
+		"characters_saved": characters_saved,
+		"animations_bound": animations_bound,
+		"warnings": warnings,
+		"errors": errors,
+		"messages": reported_messages,
+	}))
 
 	if errors > 0:
 		print("")
