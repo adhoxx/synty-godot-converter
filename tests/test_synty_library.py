@@ -29,6 +29,7 @@ from synty_library import (  # noqa: E402
     find_unity_source,
     has_meshes,
     has_sprites,
+    needs_conversion,
     normalise,
 )
 
@@ -619,3 +620,53 @@ class TestSidekickDatabaseDiscovery:
 
         # The tool root is the database's grandparent: Database/<db>.
         assert find_master_color_map([database.parent.parent]) == palette
+
+
+class TestStalePackRefresh:
+    """An existing pack's output folder is not proof that it is up to date.
+
+    converter.py stamps each pack with the metadata schema it was written
+    against and refreshes a stale one without re-copying its FBX. The library
+    driver skipped on the folder alone, so the whole mechanism never fired for
+    anyone converting through it - every fix since their last run stayed
+    invisible until they passed --force and paid for a full re-extract.
+    """
+
+    def _pack(self, tmp_path, version):
+        import json
+
+        pack = tmp_path / "POLYGON_Dungeon"
+        pack.mkdir(parents=True)
+        if version is not None:
+            (pack / "pack_metadata.json").write_text(
+                json.dumps({"schema_version": version})
+            )
+        return tmp_path
+
+    def test_current_pack_is_skipped(self, tmp_path):
+        output = self._pack(tmp_path, converter_module.PACK_METADATA_VERSION)
+        assert needs_conversion(output, "POLYGON_Dungeon", force=False) is False
+
+    def test_stale_pack_is_converted(self, tmp_path):
+        output = self._pack(tmp_path, converter_module.PACK_METADATA_VERSION - 1)
+        assert needs_conversion(output, "POLYGON_Dungeon", force=False) is True
+
+    def test_ui_pack_without_metadata_is_skipped(self, tmp_path):
+        """UI and animation packs write no metadata, and re-running those on
+        every invocation would be a surprise."""
+        output = self._pack(tmp_path, None)
+        assert needs_conversion(output, "POLYGON_Dungeon", force=False) is False
+
+    def test_mesh_pack_without_metadata_is_converted(self, tmp_path):
+        """A mesh pack with no stamp predates the stamp, so it is the stalest
+        output there is - POLYGON_Dungeon in a real library was exactly this."""
+        output = self._pack(tmp_path, None)
+        (output / "POLYGON_Dungeon" / "mesh_material_mapping.json").write_text("{}")
+        assert needs_conversion(output, "POLYGON_Dungeon", force=False) is True
+
+    def test_missing_pack_is_converted(self, tmp_path):
+        assert needs_conversion(tmp_path, "POLYGON_Nothing", force=False) is True
+
+    def test_force_converts_a_current_pack(self, tmp_path):
+        output = self._pack(tmp_path, converter_module.PACK_METADATA_VERSION)
+        assert needs_conversion(output, "POLYGON_Dungeon", force=True) is True

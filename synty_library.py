@@ -45,8 +45,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from converter import (  # noqa: E402
+    PACK_METADATA_FILENAME,
     ConversionConfig,
     extract_pack_name_from_package,
+    pack_metadata_is_current,
     run_conversion,
 )
 from sidekick import find_sidekick_database  # noqa: E402
@@ -330,13 +332,44 @@ def collect_warnings(output: Path, results: list[dict]) -> list[str]:
     return notes
 
 
+def needs_conversion(output: Path, pack_name: str, force: bool) -> bool:
+    """Whether a pack has to be converted, or can be left as it stands.
+
+    An output folder alone does not mean a pack is up to date. converter.py
+    stamps each one with the metadata schema it was written against and
+    refreshes a stale pack cheaply, re-deriving everything but the FBX copy -
+    so a pack whose stamp has fallen behind is converted rather than skipped,
+    and the fixes made since its last run reach it without --force.
+
+    A mesh pack carrying no stamp at all is the oldest conversion of the lot -
+    it predates the stamp - so it is stale too. UI and animation packs never
+    write one, and re-running those on every invocation would be a surprise;
+    mesh_material_mapping.json is what tells the two apart, since only a mesh
+    pack writes it.
+
+    Args:
+        output: The Godot project directory being built.
+        pack_name: Pack folder name within it.
+        force: Convert regardless.
+
+    Returns:
+        True when the pack should be converted.
+    """
+    pack_output = output / pack_name
+    if force or not pack_output.exists():
+        return True
+    if (pack_output / PACK_METADATA_FILENAME).exists():
+        return not pack_metadata_is_current(pack_output)
+    return (pack_output / "mesh_material_mapping.json").exists()
+
+
 def process(package: Path, args: argparse.Namespace, log_dir: Path) -> dict:
     """Converts one package by whichever route its contents call for."""
     pack_name = extract_pack_name_from_package(package)
     started = time.monotonic()
     record = {"package": package.name, "pack": pack_name}
 
-    if (args.output / pack_name).exists() and not args.force:
+    if not needs_conversion(args.output, pack_name, args.force):
         record.update(status="skipped", detail="already converted", seconds=0.0)
         return record
 
@@ -440,7 +473,7 @@ def convert_library(
     if args.dry_run:
         for package in packages:
             pack_name = extract_pack_name_from_package(package)
-            if (args.output / pack_name).exists() and not args.force:
+            if not needs_conversion(args.output, pack_name, args.force):
                 route = "skipped (already converted)"
             else:
                 counts = count_assets_by_suffix(package)
