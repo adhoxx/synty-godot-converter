@@ -1,101 +1,156 @@
 # Synty Unity-to-Godot Converter
 
-Convert Synty Studios Unity asset packs (`.unitypackage` files) to Godot 4.6 with full shader support, automatic material conversion, and FBX mesh processing.
+Turn Synty Studios asset packs (`.unitypackage` files) into a working Godot 4
+project: meshes with their materials and shaders, rigged characters that
+animate, UI sprites, and a runtime for building modular Sidekick characters in
+your game.
 
-**Version 2.4** - Output subfolder organization, retain source directory structure.
+**You do not need Unity installed.** Meshes are read straight out of the
+`.unitypackage`, which is all Unity's import does for a mesh.
 
-## Features
+## Getting started
 
-- **Full material conversion** - Parses Unity `.mat` files and generates Godot `ShaderMaterial` `.tres` files
-- **3-tier shader detection** - GUID lookup (56 known shaders), name pattern matching, property-based analysis
-- **7 Godot shaders** - Polygon, Foliage, Crystal, Water, Clouds, Particles, Skydome
-- **FBX mesh conversion** - Imports FBX models via Godot CLI with materials pre-assigned
-- **Texture handling** - Extracts textures from `.unitypackage` with fallback to SourceFiles
-- **Modern GUI** - CustomTkinter interface with real-time logging, progress display, and settings persistence
-- **Global shader uniforms** - Generates `project.godot` with wind, sky, and water parameters
-- **Recursive folder discovery** - Finds FBX files in nested pack structures automatically
-- **Project merging** - Merges `project.godot` settings for multi-pack workflows
-- **LOD inheritance** - Consistent shader detection across LOD levels
-- **Smart filtering** - When using `--filter`, only copies textures and materials needed by filtered FBX files
-- **High quality texture compression** - Optional BPTC compression for improved texture quality
-- **Per-pack isolation** - Each pack gets its own folder with `mesh_material_mapping.json` for targeted processing
-- **Dynamic shader discovery** - Finds existing shaders in your project before copying duplicates
-- **Clean FBX paths** - Strips `SourceFiles/FBX/Models` prefixes for cleaner output structure
-- **Comprehensive fallback matching** - Name variations, prefix swaps, and fuzzy matching (Levenshtein) for materials
-- **Output subfolder organization** - Organize converted packs into custom subfolders with `--output-subfolder`
-- **Retain source structure** - Preserve `Source_Files/FBX/` subdirectory structure in mesh output with `--retain-subfolders`
+You need:
 
-## Convert your whole library
+- **Python 3.10+** (the command-line tool needs nothing else installed)
+- **Godot 4.x** - on Windows use the `_console.exe` build, or you will see no
+  progress and no errors
+- **Your `.unitypackage` files**, all in one folder
 
-One command turns a folder of `.unitypackage` files into a Godot project with
-meshes, materials, characters, animations, UI sprites and a runtime for swapping
-Sidekick character parts:
+Then run one command:
 
 ```bash
-python synty_library.py     --packages "C:/Users/me/Downloads"     --godot "C:/Godot/Godot_v4.6-stable_win64_console.exe"     --output "C:/Godot/Projects/synty"
+python synty_library.py \
+    --packages "C:/Users/me/Downloads" \
+    --godot "C:/Godot/Godot_v4.6-stable_win64_console.exe" \
+    --output "MyGodotProject"
 ```
 
-| Flag | Required | What it is |
-|------|----------|------------|
-| `--packages` | yes | The folder holding your `.unitypackage` files |
-| `--godot` | yes | Godot's **console** executable - the plain `.exe` on Windows writes nothing to a pipe, so progress and errors go blank |
-| `--output` | yes | The Godot project to build. It need not exist |
-| `--unity-assets` | no | A Unity project's `Assets/Synty`, if you happen to have the packs imported there |
-| `--work-dir` | no | Where to stage FBX read out of packages. Defaults beside `--output` |
-| `--no-retarget` | no | Skip rig retargeting. Characters still convert; clips no longer bind to them |
-| `--only`, `--force`, `--dry-run` | no | Narrow the run, re-convert what exists, or print the routing and stop |
+That converts every pack in the folder, in the right order, into one Godot
+project. Open `MyGodotProject` in Godot when it finishes and everything is
+already imported and ready to drag into a scene.
 
-**No Unity install is needed.** Without `--unity-assets` every pack is read
-straight out of its `.unitypackage`, which is all Unity's import does for a mesh.
+It is safe to stop and re-run: a pack that already converted is skipped, so an
+interrupted run picks up where it left off. Add `--dry-run` first if you want to
+see what it will do without doing it.
 
-**Supported character rigs are Polygon and Sidekick**, deliberately. Anything
-else - Synty's chibi Mini Fantasy rig, for instance - converts as meshes and
-binds no clips. Guessing a bone mapping for an unknown rig produces a mangled
-character rather than an unanimated one, so the tool refuses instead.
+### What you end up with
 
-**Converting a SIDEKICK pack installs `addons/synty_sidekick/`**, the runtime
-that assembles modular characters and swaps their parts, gear, proportions and
-colours while your game runs. Open
-`addons/synty_sidekick/sidekick_viewer.tscn` to browse what your library
-produced; see that folder's README to drive it from game code.
+```
+MyGodotProject/
+├── POLYGON_Dungeon/            one folder per pack
+│   ├── meshes/tscn_separate/   drag these into your scenes
+│   ├── materials/  textures/  models/
+├── SIDEKICK_Starter/
+├── INTERFACE_Fantasy_Menus/
+│   └── ui/                     sprites, imported as textures
+├── animations/                 AnimationLibrary resources
+├── addons/synty_sidekick/      the Sidekick runtime and viewer
+├── sidekick_parts/             the shared modular-character parts
+├── shaders/                    the Godot shaders the materials use
+└── conversion_logs/            one log per pack, plus a JSON roll-up
+```
 
-The run ends by naming what it could not do: a missing `Side_Kick_Data.db` (which
-ships with Synty's Sidekick Unity tool, never inside a `.unitypackage`, and
-without which attachment joints do not follow body size and recolouring is
-unavailable), and any pack that declared characters and built none. Characters
-still assemble, animate and mix by body region without it - point
-`--unity-assets` at a Unity project with the Sidekick tool installed to pick the
-database up.
+## The tools
 
-## Quick Start
+| Tool | Use it to |
+|------|-----------|
+| **`synty_library.py`** | Convert a whole folder of packs in one command. Start here. |
+| **`gui.py`** (or `SyntyConverter.exe`) | The same thing with a window, if you would rather not use a terminal. |
+| **`converter.py`** | Convert one pack, with control over every option. |
+| **The Sidekick viewer** | Browse and customise modular characters. Installed into your project automatically. |
+| **`tools/extract_fbx.py`** | Pull just the FBX out of a `.unitypackage`. |
+
+### The GUI
 
 ```bash
-# CLI (no dependencies required)
-# Note: --source-files supports recursive discovery, so you can point to
-# the top-level SourceFiles folder even if FBX files are in subdirectories.
-python converter.py \
-    --unity-package "C:\SyntyComplete\POLYGON_Fantasy\Fantasy.unitypackage" \
-    --source-files "C:\SyntyComplete\POLYGON_Fantasy\SourceFiles" \
-    --output "C:\Godot\Projects\fantasy-assets" \
-    --godot "C:\Godot\Godot_v4.6-stable_mono_win64\Godot_v4.6-stable_mono_win64.exe"
-
-# GUI (requires additional dependencies)
 pip install -r requirements-gui.txt
 python gui.py
 ```
+
+Fill in **Packages Folder**, **Output Directory** and **Godot Executable**, then
+press **Convert Library**. Progress appears in the log pane on the right.
+
+The **Convert** button beside it converts a single pack instead, using the Unity
+Package and Source Files fields; the two modes do not interfere.
+
+### One pack at a time
+
+`converter.py` takes one pack and needs to be told where its meshes are:
+
+```bash
+python converter.py \
+    --unity-package "C:/Downloads/POLYGON_Dungeon.unitypackage" \
+    --source-files "C:/Synty/PolygonDungeon/SourceFiles" \
+    --output "MyGodotProject" \
+    --godot "C:/Godot/Godot_v4.6-stable_win64_console.exe"
+```
+
+Useful while iterating on one pack - `--filter Barrel` converts only matching
+meshes - but for a whole library `synty_library.py` makes these decisions for
+you. Note that its `--retarget` is off by default, where the library tool has it
+on; see [Retargeting](#retargeting-and-how-polygon-characters-get-animated).
+
+## Using your converted assets in Godot
+
+Open the output folder as a Godot project. Everything below is ready to use with
+no further steps.
+
+**Props, buildings and environment.** Drag any `.tscn` from a pack's
+`meshes/tscn_separate/` folder into your scene. Materials, shaders and textures
+are already attached.
+
+**Characters.** A pack's character scenes are in the same place, named
+`SM_Chr_*`. Each carries its own `Skeleton3D`, an `AnimationPlayer` with
+compatible clips already bound, and `BoneAttachment3D` nodes for its gear. Play a
+clip by name:
+
+```gdscript
+$SM_Chr_ZombieBoss_Wretch_01/AnimationPlayer.play(
+    "ANIMATION_Goblin_Locomotion_Humanoid/A_POLY_GBL_Walk_F_Neut")
+```
+
+Clips whose name contains `_Additive_` are meant to be blended over a base pose
+in an `AnimationTree`, not played on their own - one played directly folds the
+character up and looks like a broken rig.
+
+**UI sprites.** A UI pack's PNGs land in `<Pack>/ui/`, already imported. Drop one
+on a `TextureRect` or a `Button`'s icon.
+
+**Sidekick characters.** See [Sidekick packs](#sidekick-packs) below - they are
+assembled at runtime from a shared parts library rather than shipped as finished
+scenes.
 
 ## Installation
 
 **Requirements:**
 - Python 3.10+
-- Godot 4.6 (mono or standard)
+- Godot 4.x (4.6 or newer recommended; the console build on Windows)
 
-**GUI dependencies** (optional):
+The command-line tools need the standard library only. The GUI needs:
+
 ```bash
 pip install -r requirements-gui.txt
 ```
 
-This installs CustomTkinter for the graphical interface.
+## What gets converted
+
+- **Materials** - Unity `.mat` files become Godot `ShaderMaterial` `.tres`, with
+  the right shader chosen by GUID lookup (56 known Synty shaders), then name
+  patterns, then property analysis
+- **Shaders** - Polygon, Foliage, Crystal, Water, Clouds, Particles and Skydome,
+  installed into the project and shared between packs
+- **Meshes** - FBX imported through Godot with materials pre-assigned, one
+  `.tscn` per mesh by default, or `.res` and combined scenes on request
+- **Textures** - taken from the `.unitypackage`, with lossless compression by
+  default and BPTC available via `--high-quality-textures`
+- **Rigged characters** - `Skeleton3D`, skinning, gear attachment points and an
+  `AnimationPlayer`, driven by character definitions read from Unity prefabs
+- **Animation packs** - clip FBX become `AnimationLibrary` resources, retargeted
+  onto a common humanoid rig so they bind to characters from other packs
+- **Sidekick characters** - a shared library of body parts, gear sets, colour
+  tables and blend-shape proportions, plus the runtime that assembles them
+- **UI sprites** - written where Godot imports them as textures unaided
 
 ## CLI Options
 
@@ -555,6 +610,11 @@ pack regenerates its metadata instead, re-running everything except the FBX copy
 So upgrading the converter and re-running picks up new metadata without a manual
 cache clear, and without recopying thousands of FBX.
 
+One thing a re-run will not do on its own: a character pack binds its animation
+libraries at conversion time, so adding a new animation pack later and re-running
+leaves already-converted character packs as they were. Re-convert them with
+`--force` (or `--only <pack>` plus `--force`) to pick the new clips up.
+
 `--prune-models` deletes a pack's staging FBX once mesh generation succeeds. They
 are input, not output: the generated scenes embed their mesh data. On a shared
 source pool they are also the same bytes in every pack - pruning the seven Sidekick
@@ -570,8 +630,7 @@ no FBX and re-copies them, so pruning costs a full re-run rather than breaking o
 
 `converter.py` takes one pack per run and has to be told where that pack's meshes
 live. `synty_library.py` makes that decision per pack across a folder of
-packages - see [Convert your whole library](#convert-your-whole-library) for the
-command.
+packages - see [Getting started](#getting-started) for the command.
 
 Add `--dry-run` to print each pack and the route it would take without converting
 anything. `--only` narrows the run to packages matching a comma-separated list of
@@ -597,18 +656,19 @@ compose, so a UI pack's handful of meshes still convert. The signal is dominance
 not absence: a prop pack's textures are outnumbered by its meshes, a sprite set
 outnumbers them tenfold.
 
-## GUI Features
+## GUI reference
 
-The GUI (`gui.py`) provides:
+Getting started with the GUI is under [The GUI](#the-gui). Beyond the two
+convert buttons it offers:
+
 - Real-time conversion progress with percentage and ETA
-- Detailed logging with warning/error highlighting
-- **Settings persistence** - Paths and options are saved between sessions
+- Detailed logging with warning and error highlighting
+- **Settings persistence** - paths and options are saved between sessions
 - Dry-run mode for previewing conversions
-- **Convert Library** - the whole-library conversion above, without the
-  command line. Fill in Packages Folder, Output Directory and Godot
-  Executable and press it; Filter by Name narrows the run to matching
-  packages and Dry Run prints the routing without converting. The other
-  fields are for single-pack conversion and are ignored.
+
+In library mode, **Filter by Name** narrows the run to matching packages and
+**Dry Run** prints the routing without converting. The remaining fields apply to
+single-pack conversion only.
 
 ## Documentation
 
