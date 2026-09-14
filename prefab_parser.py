@@ -89,7 +89,7 @@ _MESH_REF_PATTERN = re.compile(
 _MODIFICATIONS_KEY_PATTERN = re.compile(r"^(\s*)m_Modifications:\s*$", re.MULTILINE)
 _MODIFICATION_SPLIT_PATTERN = re.compile(r"^\s*-\s+(?=target:)", re.MULTILINE)
 _MODIFICATION_TARGET_PATTERN = re.compile(
-    r"target:\s*\{fileID:\s*-?\d+,\s*guid:\s*([a-f0-9]{32})"
+    r"target:\s*\{fileID:\s*(-?\d+),\s*guid:\s*([a-f0-9]{32})"
 )
 _MODIFICATION_SLOT_PATTERN = re.compile(
     r"propertyPath:\s*m_Materials\.Array\.data\[(\d+)\]"
@@ -179,15 +179,16 @@ def _lod_sort_key(index_and_mesh: tuple[int, MeshMaterials]) -> tuple[int, int]:
     return (lod_level, index)
 
 
-def _material_modifications(text: str) -> list[tuple[str, int, str]]:
+def _material_modifications(text: str) -> list[tuple[str, str, int, str]]:
     """Material assignments carried as PrefabInstance modifications.
 
     Returns:
-        ``(target_guid, slot_index, material_guid)`` per ``m_Materials`` entry,
-        in document order. ``target_guid`` identifies the source FBX and
+        ``(target_guid, target_file_id, slot_index, material_guid)`` per
+        ``m_Materials`` entry, in document order. ``target_guid`` identifies
+        the source FBX, ``target_file_id`` the renderer within it, and
         ``slot_index`` the surface the material belongs to.
     """
-    found: list[tuple[str, int, str]] = []
+    found: list[tuple[str, str, int, str]] = []
 
     for key in _MODIFICATIONS_KEY_PATTERN.finditer(text):
         indent = len(key.group(1))
@@ -221,22 +222,40 @@ def _material_modifications(text: str) -> list[tuple[str, int, str]]:
                 continue
 
             found.append(
-                (target_match.group(1), int(slot_match.group(1)), object_match.group(1))
+                (
+                    target_match.group(2),
+                    target_match.group(1),
+                    int(slot_match.group(1)),
+                    object_match.group(1),
+                )
             )
 
     return found
 
 
-def _meshes_from_modifications(
+def _renderers_by_fbx(
     text: str,
     prefab_name: str,
     guid_to_material_name: dict[str, str],
     guid_to_mesh_name: dict[str, str],
-) -> list[MeshMaterials]:
-    """Mesh/material pairs for a prefab variant, grouped by source FBX."""
-    by_target: dict[str, dict[int, str]] = {}
+) -> dict[str, list[list[str]]]:
+    """Per-renderer material slots for a prefab variant, keyed by source FBX.
 
-    for target_guid, slot_index, material_guid in _material_modifications(text):
+    One FBX often holds several renderers - a wall body and its glass pane, a
+    hand cart and its two wheels - and every one of them modifies the same FBX
+    GUID. Only the target's fileID separates them, so grouping on the GUID
+    alone lets one renderer's slot 0 overwrite another's.
+
+    Returns:
+        FBX name to one ordered slot list per renderer, largest renderer first.
+        The FBX's own name belongs to its body mesh, which carries the most
+        surfaces, and Godot falls back to the first entry when it cannot match
+        a mesh by surface count.
+    """
+    by_renderer: dict[tuple[str, str], dict[int, str]] = {}
+    order: list[tuple[str, str]] = []
+
+    for target_guid, file_id, slot_index, material_guid in _material_modifications(text):
         mesh_name = guid_to_mesh_name.get(target_guid)
         if not mesh_name:
             logger.debug(
@@ -256,20 +275,56 @@ def _meshes_from_modifications(
             )
             continue
 
-        by_target.setdefault(target_guid, {})[slot_index] = material_name
+        key = (target_guid, file_id)
+        if key not in by_renderer:
+            by_renderer[key] = {}
+            order.append(key)
+        by_renderer[key][slot_index] = material_name
 
+    renderers: dict[str, list[list[str]]] = {}
+    for target_guid, file_id in order:
+        slots_by_index = by_renderer[(target_guid, file_id)]
+        renderers.setdefault(guid_to_mesh_name[target_guid], []).append(
+            [slots_by_index[index] for index in sorted(slots_by_index)]
+        )
+
+    # Stable, so renderers of equal size keep their document order.
+    for slot_lists in renderers.values():
+        slot_lists.sort(key=len, reverse=True)
+
+    return renderers
+
+
+def _meshes_from_modifications(
+    text: str,
+    prefab_name: str,
+    guid_to_material_name: dict[str, str],
+    guid_to_mesh_name: dict[str, str],
+) -> list[MeshMaterials]:
+    """The body mesh of each FBX a prefab variant assigns materials to.
+
+    Only one entry per FBX: ``mesh_material_mapping.json`` is keyed by mesh
+    name, so a second entry under the same name would overwrite the first. The
+    remaining renderers reach Godot through
+    :func:`build_fbx_material_fallback` instead.
+    """
     meshes: list[MeshMaterials] = []
-    for target_guid, slots_by_index in by_target.items():
-        slots = [
-            MaterialSlot(
-                material_name=slots_by_index[index],
-                texture_name=None,
-                uses_custom_shader=True,
-            )
-            for index in sorted(slots_by_index)
-        ]
+
+    for mesh_name, slot_lists in _renderers_by_fbx(
+        text, prefab_name, guid_to_material_name, guid_to_mesh_name
+    ).items():
         meshes.append(
-            MeshMaterials(mesh_name=guid_to_mesh_name[target_guid], slots=slots)
+            MeshMaterials(
+                mesh_name=mesh_name,
+                slots=[
+                    MaterialSlot(
+                        material_name=material_name,
+                        texture_name=None,
+                        uses_custom_shader=True,
+                    )
+                    for material_name in slot_lists[0]
+                ],
+            )
         )
 
     return meshes
@@ -441,6 +496,73 @@ def build_prefabs_from_package(guid_map) -> list[PrefabMaterials]:
         len(guid_to_material_name),
     )
     return prefabs
+
+
+def build_fbx_material_fallback(guid_map) -> dict[str, list[list[str]]]:
+    """Materials per FBX, for meshes that have no mapping of their own.
+
+    A prefab variant names its mesh by the source FBX, so when one FBX holds
+    several meshes only the one sharing the FBX's name is mapped - a hand cart
+    is painted while its two wheels stay untextured. Godot knows which FBX each
+    mesh came from and falls back to this table, choosing between an FBX's
+    renderers by surface count.
+
+    Args:
+        guid_map: ``unity_package.GuidMap`` carrying ``guid_to_pathname`` and
+            ``guid_to_prefab_content``.
+
+    Returns:
+        FBX name to one ordered material-name list per renderer, largest
+        first. Empty for packs whose prefabs all carry renderers of their own.
+
+    Example:
+        >>> build_fbx_material_fallback(guid_map)["SM_Prop_HandCart_01"]
+        [['PolygonNatureBiomesMeadow_Mat_01']]
+    """
+    prefab_content = getattr(guid_map, "guid_to_prefab_content", None) or {}
+    if not prefab_content:
+        return {}
+
+    guid_to_material_name: dict[str, str] = {}
+    guid_to_mesh_name: dict[str, str] = {}
+    for guid, pathname in guid_map.guid_to_pathname.items():
+        lowered = pathname.lower()
+        basename = pathname.rsplit("/", 1)[-1]
+        if lowered.endswith(".mat"):
+            guid_to_material_name[guid] = basename[: -len(".mat")]
+        elif lowered.endswith(".fbx"):
+            guid_to_mesh_name[guid] = basename[: -len(".fbx")]
+
+    fallback: dict[str, list[list[str]]] = {}
+
+    for guid, content in prefab_content.items():
+        pathname = guid_map.guid_to_pathname.get(guid, "")
+        prefab_name = pathname.rsplit("/", 1)[-1]
+        if prefab_name.lower().endswith(".prefab"):
+            prefab_name = prefab_name[: -len(".prefab")]
+
+        # Prefabs that carry renderers name their meshes directly, so every
+        # mesh in them is already mapped and none needs a fallback.
+        if parse_prefab_bytes(content, prefab_name, guid_to_material_name) is not None:
+            continue
+
+        try:
+            text = content.decode("utf-8", errors="replace")
+        except Exception:  # pragma: no cover - decode with errors= rarely raises
+            continue
+
+        for mesh_name, slot_lists in _renderers_by_fbx(
+            text, prefab_name, guid_to_material_name, guid_to_mesh_name
+        ).items():
+            for slots in slot_lists:
+                if slots not in fallback.setdefault(mesh_name, []):
+                    fallback[mesh_name].append(slots)
+
+    for slot_lists in fallback.values():
+        slot_lists.sort(key=len, reverse=True)
+
+    logger.debug("Built FBX material fallback for %d FBX file(s)", len(fallback))
+    return fallback
 
 
 @dataclass

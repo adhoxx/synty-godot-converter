@@ -43,6 +43,15 @@ extends SceneTree
 ## @type Dictionary[String, Array[String]]
 var mesh_to_materials: Dictionary = {}
 
+## Maps an FBX name to one material-name array per renderer, largest first.
+##
+## A prefab variant names its mesh by the source FBX, so the other meshes in a
+## multi-mesh FBX get no mapping of their own - a hand cart is painted while its
+## two wheels stay untextured. Those meshes fall back to the FBX they came from.
+## Empty when the pack ships no fbx_material_fallback.json.
+## @type Dictionary[String, Array]
+var fbx_to_materials: Dictionary = {}
+
 ## Tracks mesh names that have been saved to detect duplicates across FBX files.
 ## Keys are output paths, values are true (just used as a set).
 ## @type Dictionary[String, bool]
@@ -434,7 +443,41 @@ func load_material_mapping(pack_folder: String) -> bool:
 	mesh_to_materials = data
 	print("  Loaded material mapping with %d mesh entries" % mesh_to_materials.size())
 
+	load_fbx_material_fallback(pack_folder)
 	return true
+
+
+## Loads the per-FBX material fallback, if the pack ships one.
+##
+## Optional by design: packs converted from a MaterialList name every mesh
+## directly and need no fallback, so a missing file is not an error.
+##
+## @param pack_folder Resource path to the pack folder.
+func load_fbx_material_fallback(pack_folder: String) -> void:
+	fbx_to_materials = {}
+	var path := pack_folder + "/fbx_material_fallback.json"
+	if not FileAccess.file_exists(path):
+		return
+
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		_report_warning("    Warning: could not open %s" % path)
+		return
+	var text := file.get_as_text()
+	file.close()
+
+	var json := JSON.new()
+	if json.parse(text) != OK:
+		_report_warning("    Warning: could not parse %s: %s" % [path, json.get_error_message()])
+		return
+
+	var data = json.get_data()
+	if not data is Dictionary:
+		_report_warning("    Warning: %s is not a Dictionary" % path)
+		return
+
+	fbx_to_materials = data
+	print("  Loaded FBX material fallback with %d entries" % fbx_to_materials.size())
 
 
 ## Minimum bone-name coverage before a bind is reported as suspect.
@@ -943,7 +986,9 @@ func save_fbx_as_single_scene(scene_root: Node, mesh_instances: Array[MeshInstan
 			continue
 
 		# Get materials for this mesh
-		var material_names := get_material_names_for_mesh(mesh_name)
+		var material_names := get_material_names_for_mesh(
+			mesh_name, fbx_name, original_mesh.get_surface_count()
+		)
 
 		# Apply materials as overrides
 		for i in range(original_mesh.get_surface_count()):
@@ -1182,7 +1227,9 @@ func extract_and_save_mesh(mesh_instance: MeshInstance3D, relative_dir: String, 
 		return  # Skip normal material lookup
 
 	# Get materials for this mesh (loaded as external resources)
-	var material_names := get_material_names_for_mesh(mesh_name)
+	var material_names := get_material_names_for_mesh(
+		mesh_name, fbx_name, original_mesh.get_surface_count()
+	)
 	var materials_applied := 0
 
 	# Apply materials as overrides (references to external .tres files, not baked in)
@@ -1414,10 +1461,18 @@ func _apply_materials_to(mesh_instance: MeshInstance3D, mesh_name: String) -> vo
 ## 2. Generate all name variations (prefix swaps, suffix removal, combinations)
 ## 3. Try fuzzy matching (Levenshtein distance <= 2) as last resort
 ##
+## 4. Fall back to the materials of the FBX the mesh was imported from
+##
 ## @param mesh_name The mesh name to look up (e.g., "SM_Prop_Crystal_01_001").
+## @param fbx_name Name of the FBX this mesh came from, for the per-FBX
+##        fallback. Empty skips that step.
+## @param surface_count Surfaces on the mesh, used to pick between an FBX's
+##        renderers. Zero takes the largest.
 ## @returns Array[String] Material names for each surface. May contain empty strings
 ##          for surfaces with no material mapping. Empty array if mesh not found.
-func get_material_names_for_mesh(mesh_name: String) -> Array[String]:
+func get_material_names_for_mesh(
+	mesh_name: String, fbx_name: String = "", surface_count: int = 0
+) -> Array[String]:
 	var material_names_result: Array[String] = []
 	var lookup_name := mesh_name
 
@@ -1441,6 +1496,15 @@ func get_material_names_for_mesh(mesh_name: String) -> Array[String]:
 				print("      Fuzzy match: '%s' -> '%s'" % [mesh_name, fuzzy_match])
 				lookup_name = fuzzy_match
 				found = true
+
+		if not found:
+			# The mesh has no mapping of its own. When it came out of an FBX
+			# that does, it is a sibling of the mapped mesh - a cart's wheel,
+			# a window's glass - and wears the same materials.
+			var from_fbx := _materials_from_fbx(fbx_name, surface_count)
+			if not from_fbx.is_empty():
+				print("      From FBX '%s': '%s' -> %s" % [fbx_name, mesh_name, from_fbx])
+				return from_fbx
 
 		if not found:
 			# Final fallback: use default material if available
@@ -1471,6 +1535,51 @@ func get_material_names_for_mesh(mesh_name: String) -> Array[String]:
 			material_names_result.append("")
 
 	return material_names_result
+
+
+## Materials of the FBX a mesh was imported from.
+##
+## An FBX can hold several renderers - a wall body with three surfaces and its
+## glass pane with one - so the surface count picks between them. Falls back to
+## the first entry, which is the largest and so the body.
+##
+## Packs whose prefabs carry renderers ship no fallback table at all; there the
+## FBX's name is itself a mesh name, so the plain mapping answers instead.
+##
+## @param fbx_name Name of the FBX, or "" to skip.
+## @param surface_count Surfaces on the mesh; 0 takes the largest renderer.
+## @returns Array[String] Material names, or empty when the FBX has no entry.
+func _materials_from_fbx(fbx_name: String, surface_count: int) -> Array[String]:
+	var result: Array[String] = []
+	if fbx_name.is_empty():
+		return result
+
+	if not fbx_to_materials.has(fbx_name):
+		# Packs mapped from renderer prefabs have no fallback table, but the
+		# FBX's own name is a mesh name there, and its siblings share it.
+		if mesh_to_materials.has(fbx_name):
+			for material_name in mesh_to_materials[fbx_name]:
+				if material_name is String:
+					result.append(material_name)
+		return result
+
+	var renderers = fbx_to_materials[fbx_name]
+	if not renderers is Array or renderers.is_empty():
+		return result
+
+	var chosen = renderers[0]
+	if surface_count > 0:
+		for candidate in renderers:
+			if candidate is Array and candidate.size() == surface_count:
+				chosen = candidate
+				break
+
+	if not chosen is Array:
+		return result
+	for material_name in chosen:
+		if material_name is String:
+			result.append(material_name)
+	return result
 
 
 ## Generates all possible name variations for fallback matching.

@@ -66,6 +66,7 @@ from material_list import (
 )
 from retarget import inject_subresources, render_bone_map, resolve_bone_map
 from prefab_parser import (
+    build_fbx_material_fallback,
     build_prefabs_from_package,
     build_character_definitions,
     write_character_definitions_json,
@@ -91,12 +92,12 @@ logger = logging.getLogger(__name__)
 # existing pack converted by an earlier version refreshes its metadata instead
 # of skipping ahead forever with whatever fields that version happened to emit.
 # Bump this whenever the shape *or the content* of mesh_material_mapping.json,
-# character_definitions.json, sidekick_characters.json or
-# sidekick_rig_adjustments.json changes. A fix that derives more than the last
+# fbx_material_fallback.json, character_definitions.json,
+# sidekick_characters.json or sidekick_rig_adjustments.json changes. A fix that derives more than the last
 # version did is exactly as stale to an existing pack as a renamed field: the
 # pack skips straight to mesh generation and keeps the thinner mapping forever.
 PACK_METADATA_FILENAME = "pack_metadata.json"
-PACK_METADATA_VERSION = 5
+PACK_METADATA_VERSION = 6
 
 
 def has_source_assets_recursive(path: Path) -> bool:
@@ -3008,6 +3009,22 @@ def run_conversion(config: ConversionConfig) -> ConversionStats:
                     else:
                         generate_mesh_material_mapping_json(prefabs, mapping_output)
                         logger.debug("Generated mesh_material_mapping.json to pack folder")
+
+                        # A prefab variant names its mesh by the source FBX, so
+                        # the other meshes in a multi-mesh FBX get no mapping of
+                        # their own - a hand cart is painted while its wheels
+                        # stay untextured. Godot knows which FBX each mesh came
+                        # from and falls back to this table.
+                        fbx_fallback = build_fbx_material_fallback(guid_map)
+                        if fbx_fallback:
+                            (pack_output_dir / "fbx_material_fallback.json").write_text(
+                                json.dumps(fbx_fallback, indent=2, ensure_ascii=False),
+                                encoding="utf-8",
+                            )
+                            logger.debug(
+                                "Wrote FBX material fallback for %d FBX file(s)",
+                                len(fbx_fallback),
+                            )
 
                         # Character definitions drive rigged-character output in
                         # godot_converter.gd. Absent file simply means no characters.

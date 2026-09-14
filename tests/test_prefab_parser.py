@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from prefab_parser import (  # noqa: E402
     _is_game_object_active,
+    build_fbx_material_fallback,
     build_prefabs_from_package,
     parse_prefab_bytes,
 )
@@ -340,6 +341,31 @@ PrefabInstance:
 """
 )
 
+# One FBX, two renderers. Unity tells them apart by the target's fileID, not by
+# its GUID - both name the same FBX. Shape taken from
+# SM_Bld_Base_Wall_Window_Half_02, which ships in all three packs measured: the
+# wall body carries three surfaces and the glass pane one.
+VARIANT_TWO_RENDERERS = _prefab(
+    """--- !u!1001 &1
+PrefabInstance:
+  m_Modification:
+    m_Modifications:
+    - target: {fileID: 111, guid: fbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfb, type: 3}
+      propertyPath: m_Materials.Array.data[0]
+      value:
+      objectReference: {fileID: 2100000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 2}
+    - target: {fileID: 111, guid: fbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfb, type: 3}
+      propertyPath: m_Materials.Array.data[1]
+      value:
+      objectReference: {fileID: 2100000, guid: 42b64fdb315e3054ea757d8d1c4bcfa7, type: 2}
+    - target: {fileID: 222, guid: fbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfb, type: 3}
+      propertyPath: m_Materials.Array.data[0]
+      value:
+      objectReference: {fileID: 2100000, guid: 1a64cf0a23f83924f9debcb452685f6f, type: 2}
+  m_SourcePrefab: {fileID: 100100000, guid: fbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfb, type: 3}
+"""
+)
+
 # FBX GUID -> mesh name, as resolved from GuidMap.guid_to_pathname.
 MESH_GUIDS = {"fbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfb": "SM_Prop_HandCart_01"}
 
@@ -396,6 +422,27 @@ class TestPrefabVariants:
         """Callers that pass no mesh map keep the old behaviour."""
         assert parse_prefab_bytes(VARIANT, "X", GUIDS) is None
 
+    def test_two_renderers_do_not_merge_into_one_slot_list(self):
+        """Grouping by GUID alone let the glass pane overwrite the wall body.
+
+        Both renderers name the same FBX, so a GUID-keyed dict kept whichever
+        was written last at slot 0 - shipping a wall whose first surface is
+        glass.
+        """
+        result = parse_prefab_bytes(VARIANT_TWO_RENDERERS, "X", GUIDS, MESH_GUIDS)
+        assert [s.material_name for s in result.meshes[0].slots] == [
+            "Trim_Mat",
+            "Dungeons_Texture_01_Mat",
+        ]
+
+    def test_largest_renderer_claims_the_fbx_name(self):
+        """The mesh named after the FBX is its body, which carries the most
+        surfaces. One entry only: mesh_material_mapping.json is keyed by name,
+        so a second entry under the same name would just overwrite it."""
+        result = parse_prefab_bytes(VARIANT_TWO_RENDERERS, "X", GUIDS, MESH_GUIDS)
+        assert len(result.meshes) == 1
+        assert result.meshes[0].mesh_name == "SM_Prop_HandCart_01"
+
     def test_modifications_without_materials_yield_none(self):
         data = _prefab(
             """--- !u!1001 &1
@@ -409,6 +456,59 @@ PrefabInstance:
 """
         )
         assert parse_prefab_bytes(data, "X", GUIDS, MESH_GUIDS) is None
+
+
+class TestFbxMaterialFallback:
+    """Sub-meshes of a multi-mesh FBX have no mapping of their own.
+
+    A variant names its mesh by the source FBX, so only the mesh sharing that
+    name gets a material - a hand cart is painted while its two wheels stay
+    untextured. Godot knows which FBX each mesh came from, so it can fall back
+    to the FBX's own materials; this is the table it falls back to.
+    """
+
+    def _guid_map(self, prefabs):
+        return _FakeGuidMap(
+            pathnames={
+                "fbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfb": "Assets/P/Models/SM_Prop_HandCart_01.fbx",
+                "42b64fdb315e3054ea757d8d1c4bcfa7": "Assets/P/Materials/Dungeons_Texture_01_Mat.mat",
+                "1a64cf0a23f83924f9debcb452685f6f": "Assets/P/Materials/Ghost_Mat.mat",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "Assets/P/Materials/Trim_Mat.mat",
+                "p1": "Assets/P/Prefabs/Variant.prefab",
+            },
+            prefab_content=prefabs,
+        )
+
+    def test_single_renderer_yields_one_entry(self):
+        fallback = build_fbx_material_fallback(self._guid_map({"p1": VARIANT}))
+        assert fallback == {"SM_Prop_HandCart_01": [["Trim_Mat"]]}
+
+    def test_every_renderer_is_kept(self):
+        fallback = build_fbx_material_fallback(
+            self._guid_map({"p1": VARIANT_TWO_RENDERERS})
+        )
+        assert fallback == {
+            "SM_Prop_HandCart_01": [
+                ["Trim_Mat", "Dungeons_Texture_01_Mat"],
+                ["Ghost_Mat"],
+            ]
+        }
+
+    def test_renderers_are_ordered_largest_first(self):
+        """Godot picks by surface count, and falls back to the first entry when
+        nothing matches - which should be the body, not a one-surface pane."""
+        fallback = build_fbx_material_fallback(
+            self._guid_map({"p1": VARIANT_TWO_RENDERERS})
+        )
+        sizes = [len(slots) for slots in fallback["SM_Prop_HandCart_01"]]
+        assert sizes == sorted(sizes, reverse=True)
+
+    def test_prefabs_with_renderers_contribute_nothing(self):
+        """Plain prefabs name their meshes directly, so they need no fallback."""
+        assert build_fbx_material_fallback(self._guid_map({"p1": SINGLE_MESH})) == {}
+
+    def test_package_without_prefabs_is_empty(self):
+        assert build_fbx_material_fallback(_FakeGuidMap({}, {})) == {}
 
 
 class _FakeGuidMap:
