@@ -39,6 +39,7 @@ import re
 import shutil
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -64,11 +65,16 @@ SKIP_PREFIXES = ("ParrelSync",)
 ADDON_SOURCE = REPO_ROOT / "addon" / "synty_sidekick"
 
 
-def install_addon(output: Path, report=print) -> int:
+def install_addon(output: Path, report: Callable[[str], None] = print) -> int:
     """Copies the Sidekick addon into the converted project.
 
     Refreshed on every run, so a user's own edits inside the emitted
     addons/synty_sidekick/ are overwritten - the addon's README says so.
+
+    Args:
+        output: The Godot project directory being built.
+        report: Called with each line of progress. Defaults to print; the GUI
+            passes one that writes to its log pane instead.
 
     Returns:
         Files copied. Zero means the addon source was missing, and is reported.
@@ -391,7 +397,9 @@ def _status(sprites_ok: bool | None, meshes_ok: bool | None) -> str:
     return "failed"
 
 
-def convert_library(args: argparse.Namespace, report=print) -> int:
+def convert_library(
+    args: argparse.Namespace, report: Callable[[str], None] = print
+) -> int:
     """Converts every package in a folder into one Godot project.
 
     Shared by the CLI and the GUI, which differ only in where progress goes.
@@ -502,6 +510,11 @@ def convert_library(args: argparse.Namespace, report=print) -> int:
 
 
 def main() -> int:
+    """CLI entry point.
+
+    Returns:
+        Process exit code - non-zero when any pack failed.
+    """
     parser = argparse.ArgumentParser(
         description="Convert a whole Synty library into a Godot project, in one command.",
     )

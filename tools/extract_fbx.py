@@ -34,6 +34,11 @@ from unity_package import extract_fbx_to_directory  # noqa: E402
 
 
 def main() -> int:
+    """CLI entry point.
+
+    Returns:
+        Process exit code - non-zero when the package could not be read.
+    """
     parser = argparse.ArgumentParser(
         description="Extract FBX from a .unitypackage for use as --source-files."
     )
