@@ -59,13 +59,37 @@ from material_list import (
     get_custom_shader_materials,
     PrefabMaterials,
 )
+from retarget import inject_subresources, render_bone_map, resolve_bone_map
 from prefab_parser import (
     build_prefabs_from_package,
     build_character_definitions,
     write_character_definitions_json,
 )
+from sidekick import (
+    SIDEKICK_PARTS_DIRNAME,
+    build_sidekick_recipes,
+    derive_gear_sets_from_names,
+    find_master_color_map,
+    find_sidekick_database,
+    load_color_tables,
+    load_part_presets,
+    load_rig_adjustments,
+    write_sidekick_characters_json,
+    write_sidekick_colors_json,
+    write_sidekick_gear_sets_json,
+    write_sidekick_rig_adjustments_json,
+)
 
 logger = logging.getLogger(__name__)
+
+# Records which metadata schema a converted pack was written against, so an
+# existing pack converted by an earlier version refreshes its metadata instead
+# of skipping ahead forever with whatever fields that version happened to emit.
+# Bump this whenever the shape of mesh_material_mapping.json,
+# character_definitions.json, sidekick_characters.json or
+# sidekick_rig_adjustments.json changes.
+PACK_METADATA_FILENAME = "pack_metadata.json"
+PACK_METADATA_VERSION = 4
 
 
 def has_source_assets_recursive(path: Path) -> bool:
@@ -301,9 +325,11 @@ def extract_pack_name_from_package(unity_package_path: Path) -> str:
     # Get filename without extension
     filename = unity_package_path.stem
 
-    # Pattern to match "_Unity_YYYY_V" suffix (e.g., "_Unity_2022_3")
-    # This captures everything before the Unity version marker
-    unity_pattern = re.compile(r'^(.+?)_Unity_\d{4}_\d+.*$', re.IGNORECASE)
+    # Pattern to match "_Unity_YYYY_V" suffix (e.g., "_Unity_2022_3").
+    # The minor version is optional: Goblin War Camp ships as
+    # "_Unity_2021_v1_0_2_Unity", and requiring it left "_Unity_2021" glued to
+    # the pack name, which then matched no Unity import folder.
+    unity_pattern = re.compile(r'^(.+?)_Unity_\d{4}(?:_\d+)?.*$', re.IGNORECASE)
     match = unity_pattern.match(filename)
 
     if match:
@@ -341,8 +367,13 @@ class ConversionConfig:
         verbose: If True, enable DEBUG logging level for detailed output.
         skip_fbx_copy: If True, skip copying FBX files from SourceFiles/FBX.
             Use this if the models/ directory is already populated.
+        prune_models: If True, delete the pack's models/ directory after a
+            successful conversion. The FBX are staging input, not output.
         skip_godot_cli: If True, skip Godot CLI conversion phase. This generates
             materials only without producing .tscn scene files.
+        retarget: If True, rewrite Polygon character and clip rigs onto
+            SkeletonProfileHumanoid so animation clips can bind. Costs a second
+            import pass.
         skip_godot_import: If True, skip Godot's headless import step but still
             run the GDScript converter. Useful for large projects where the
             import step times out. You'll need to open the project in Godot
@@ -390,7 +421,9 @@ class ConversionConfig:
     verbose: bool = False
     skip_fbx_copy: bool = False
     skip_godot_cli: bool = False
+    prune_models: bool = False
     skip_godot_import: bool = False
+    retarget: bool = False
     godot_timeout: int = 600
     keep_meshes_together: bool = False
     mesh_format: str = "tscn"
@@ -632,6 +665,15 @@ Examples:
         help="Skip running Godot CLI (generates materials only, no .tscn scene files)",
     )
     parser.add_argument(
+        "--prune-models",
+        action="store_true",
+        help=(
+            "Delete the pack's models/ directory once meshes are generated. "
+            "The FBX are input only - generated scenes embed their mesh data - "
+            "so this reclaims the staging copy. Skipped if conversion failed."
+        ),
+    )
+    parser.add_argument(
         "--skip-godot-import",
         action="store_true",
         help="Skip Godot's headless import step (useful for large projects that timeout). "
@@ -692,6 +734,12 @@ Examples:
         ),
     )
     parser.add_argument(
+        "--retarget",
+        action="store_true",
+        help="Retarget Polygon character and clip rigs onto SkeletonProfileHumanoid "
+             "so animation clips bind. Adds a second import pass.",
+    )
+    parser.add_argument(
         "--pack-type",
         choices=["auto", "assets", "animations"],
         default="auto",
@@ -747,7 +795,9 @@ Examples:
         verbose=args.verbose,
         skip_fbx_copy=args.skip_fbx_copy,
         skip_godot_cli=args.skip_godot_cli,
+        prune_models=args.prune_models,
         skip_godot_import=args.skip_godot_import,
+        retarget=args.retarget,
         godot_timeout=args.godot_timeout,
         keep_meshes_together=args.keep_meshes_together,
         mesh_format=args.mesh_format,
@@ -761,6 +811,128 @@ Examples:
     )
 
 
+def write_pack_metadata(pack_output_dir: Path) -> None:
+    """Stamp a pack with the metadata schema it was converted against.
+
+    Args:
+        pack_output_dir: Pack output directory.
+    """
+    (pack_output_dir / PACK_METADATA_FILENAME).write_text(
+        json.dumps({"schema_version": PACK_METADATA_VERSION}, indent=2),
+        encoding="utf-8",
+    )
+
+
+def pack_metadata_is_current(pack_output_dir: Path) -> bool:
+    """Check whether a pack's metadata was written by this schema or later.
+
+    A pack converted before a metadata change carries an older stamp, or none
+    at all, and must have its metadata regenerated - otherwise the skip-ahead
+    path leaves it permanently missing whatever the converter learned to emit
+    since. A newer stamp is left alone rather than downgraded.
+
+    Args:
+        pack_output_dir: Pack output directory.
+
+    Returns:
+        True when the pack's metadata is at least as new as this converter's.
+    """
+    metadata_path = pack_output_dir / PACK_METADATA_FILENAME
+    if not metadata_path.exists():
+        return False
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        return int(payload["schema_version"]) >= PACK_METADATA_VERSION
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError) as e:
+        logger.debug("Unreadable pack metadata at %s: %s", metadata_path, e)
+        return False
+
+
+def should_prune_models(stats: "ConversionStats") -> bool:
+    """Decide whether a pack's staging FBX can be discarded.
+
+    Only ever after mesh generation actually produced something: pruning a
+    failed run would delete the very inputs needed to retry it. A non-zero exit
+    from the Godot script is tolerated when meshes still came out, matching how
+    the caller treats a partial conversion as a success.
+
+    Args:
+        stats: Conversion statistics for the finished pack.
+
+    Returns:
+        True when pruning is safe.
+    """
+    if stats.errors or stats.godot_timeout_occurred:
+        return False
+    if not stats.godot_import_success:
+        return False
+    return stats.meshes_converted > 0
+
+
+def prune_pack_models(pack_output_dir: Path, dry_run: bool = False) -> int:
+    """Delete a pack's staging FBX, keeping everything else in models/.
+
+    The FBX are input: generated scenes embed their mesh data, so nothing
+    points at one once conversion is done. On a shared source pool they are
+    also the same bytes in every pack.
+
+    The rest of models/ must stay. Godot's FBX importer extracts a mesh's
+    embedded textures as PNGs beside it, and the generated scenes reference
+    those by path - deleting the directory wholesale leaves 200+ scenes per
+    pack unable to load. The FBX are the bulk of it regardless: 352 MB against
+    15 MB of extracted textures on a Sidekick pack.
+
+    Pruning is self-healing: the next run finds no FBX under models/, so it
+    takes the full path and re-copies them rather than attempting a metadata
+    refresh against an empty pool.
+
+    Args:
+        pack_output_dir: Pack output directory.
+        dry_run: If True, only log what would be removed.
+
+    Returns:
+        Number of FBX removed.
+    """
+    models_dir = pack_output_dir / "models"
+    if not models_dir.is_dir():
+        return 0
+
+    fbx_files = sorted(models_dir.rglob("*.fbx"))
+    if not fbx_files:
+        return 0
+
+    if dry_run:
+        logger.info("[DRY RUN] Would prune %d FBX from %s", len(fbx_files), models_dir)
+        return 0
+
+    removed = 0
+    for fbx_path in fbx_files:
+        try:
+            fbx_path.unlink()
+            # The .import sidecar describes a source that no longer exists.
+            sidecar = fbx_path.with_suffix(fbx_path.suffix + ".import")
+            if sidecar.exists():
+                sidecar.unlink()
+            removed += 1
+        except OSError as e:
+            logger.warning("Could not prune %s: %s", fbx_path, e)
+
+    # Tidy directories the FBX left behind, deepest first so parents empty out.
+    for directory in sorted(
+        (p for p in models_dir.rglob("*") if p.is_dir()),
+        key=lambda p: len(p.parts),
+        reverse=True,
+    ):
+        try:
+            directory.rmdir()
+        except OSError:
+            # Still holds extracted textures, which the scenes reference.
+            pass
+
+    logger.info("Pruned %d staging FBX from %s", removed, models_dir)
+    return removed
+
+
 def detect_existing_pack(pack_output_dir: Path) -> dict:
     """Check which phases can be skipped for an existing pack.
 
@@ -769,8 +941,10 @@ def detect_existing_pack(pack_output_dir: Path) -> dict:
     - has_textures: True if textures/ has files
     - has_models: True if models/**/*.fbx files exist
     - has_mapping: True if mesh_material_mapping.json exists
+    - has_current_metadata: True if the pack's metadata matches this schema
     """
     return {
+        "has_current_metadata": pack_metadata_is_current(pack_output_dir),
         "has_materials": bool(list((pack_output_dir / "materials").glob("*.tres"))) if (pack_output_dir / "materials").exists() else False,
         "has_textures": bool(list((pack_output_dir / "textures").glob("*.*"))) if (pack_output_dir / "textures").exists() else False,
         "has_models": bool(list((pack_output_dir / "models").rglob("*.fbx"))) if (pack_output_dir / "models").exists() else False,
@@ -1394,6 +1568,7 @@ def generate_converter_config(
     dry_run: bool,
     mode: str = "assets",
     animation_libraries: list[str] | None = None,
+    rig_report: bool = False,
 ) -> None:
     """Generate converter_config.json for Godot's godot_converter.gd script.
 
@@ -1429,6 +1604,7 @@ def generate_converter_config(
         "flatten_output": flatten_output,
         "mode": mode,
         "animation_libraries": animation_libraries or [],
+        "rig_report": rig_report,
     }
 
     config_path = project_dir / "converter_config.json"
@@ -1438,6 +1614,107 @@ def generate_converter_config(
     else:
         config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
         logger.debug("Wrote converter_config.json: %s", config)
+
+
+def _run_godot_quietly(
+    godot_exe: Path, project_dir: Path, timeout_seconds: int, *args: str
+) -> bool:
+    """Runs Godot and reports only whether it succeeded.
+
+    The main import and convert phases stream their output because they are long
+    and their progress is worth watching. The retargeting passes are neither, and
+    a second copy of the streaming reader would be the more fragile thing here.
+    """
+    command = [str(godot_exe), "--headless", *args, "--path", str(project_dir)]
+    logger.debug("Running: %s", " ".join(command))
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=timeout_seconds,
+            cwd=str(project_dir), check=False,
+        )
+    except subprocess.TimeoutExpired:
+        logger.error("Godot timed out after %ds: %s", timeout_seconds, " ".join(args))
+        return False
+    except Exception as error:  # noqa: BLE001 - reported, never fatal
+        logger.error("Failed to run Godot: %s", error)
+        return False
+    for line in (result.stdout or "").splitlines():
+        logger.debug(line)
+    if result.returncode != 0:
+        logger.error("Godot exited %d: %s", result.returncode, " ".join(args))
+        return False
+    return True
+
+
+def apply_retargeting(project_dir: Path) -> int:
+    """Writes bone maps and injects them into .import files, between import passes.
+
+    Reads the rig report the Godot side wrote, resolves the Polygon bone-map
+    template against each skeleton's real bone names, and points that file's
+    .import at the result.
+
+    Returns:
+        Number of FBX prepared. Zero means nothing was retargeted, and the caller
+        should skip the second import rather than pay for a no-op.
+    """
+    report_path = project_dir / "rig_report.json"
+    if not report_path.exists():
+        logger.warning("Retargeting skipped: no rig report at %s", report_path)
+        return 0
+
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        logger.warning("Retargeting skipped: cannot read rig report: %s", error)
+        return 0
+
+    prepared = 0
+    for res_path, entry in report.items():
+        bones = {name: tuple(origin) for name, origin in entry.get("bones", {}).items()}
+        resolved, unresolved = resolve_bone_map(bones)
+        if unresolved:
+            # Not every skinned thing is a humanoid - capes, tails and a rigged
+            # crossbow all come through here. Say which bones failed and leave
+            # the file to the unretargeted path.
+            logger.debug(
+                "No bone map for %s: %d profile bones unresolved (%s)",
+                res_path, len(unresolved), ", ".join(unresolved[:6]))
+            continue
+
+        fbx_path = project_dir / res_path.removeprefix("res://")
+        if not fbx_path.exists():
+            logger.warning("Rig report names a missing file: %s", fbx_path)
+            continue
+
+        bone_map_path = fbx_path.with_suffix(".bonemap.tres")
+        bone_map_path.write_text(render_bone_map(resolved), encoding="utf-8")
+        bone_map_res = "res://" + bone_map_path.relative_to(
+            project_dir).as_posix()
+
+        import_path = fbx_path.with_suffix(fbx_path.suffix + ".import")
+        if not import_path.exists():
+            logger.warning("No .import for %s; was it imported?", fbx_path.name)
+            continue
+        try:
+            if inject_subresources(import_path, bone_map_res):
+                prepared += 1
+            else:
+                logger.warning(
+                    "%s already carries retarget options; left alone",
+                    import_path.name)
+        except (ValueError, OSError) as error:
+            logger.warning("Retargeting skipped for %s: %s", import_path.name, error)
+
+    # Consume it. A report left behind describes the previous pack, and any
+    # future path that reads one without regenerating it would inject that
+    # pack's bone maps here.
+    try:
+        report_path.unlink()
+    except OSError as error:
+        logger.debug("Could not remove %s: %s", report_path, error)
+
+    logger.info("Retargeting: prepared %d of %d skeletons", prepared, len(report))
+    return prepared
 
 
 def run_godot_cli(
@@ -1455,6 +1732,7 @@ def run_godot_cli(
     flatten_output: bool = True,
     mode: str = "assets",
     animation_libraries: list[str] | None = None,
+    retarget: bool = False,
 ) -> tuple[bool, bool, bool, GodotRunReport]:
     """Run Godot CLI in two phases: import and convert.
 
@@ -1636,6 +1914,38 @@ def run_godot_cli(
 
         if not import_success and not dry_run:
             return import_success, convert_success, timeout_occurred, report
+
+    # Phase 1.5: Retarget. Both a character rig and the clip rigs have to be
+    # rewritten onto a common profile before anything can bind, and a bone map
+    # cannot be written until the file's real bone names are known - so this sits
+    # between two imports rather than before one.
+    if retarget and import_success and not dry_run:
+        logger.info("Retargeting: reporting rigs...")
+        generate_converter_config(
+            project_dir, pack_name, keep_meshes_together, mesh_format,
+            filter_pattern, mesh_scale, output_subfolder, flatten_output,
+            dry_run, mode=mode, animation_libraries=animation_libraries,
+            rig_report=True,
+        )
+        if _run_godot_quietly(godot_exe, project_dir, timeout_seconds,
+                              "--script", "res://godot_converter.gd"):
+            prepared = apply_retargeting(project_dir)
+            if prepared:
+                logger.info("Retargeting: re-importing %d retargeted FBX...", prepared)
+                if not _run_godot_quietly(godot_exe, project_dir, timeout_seconds,
+                                          "--import"):
+                    # Pass 1's output is still on disk and still valid; the pack
+                    # converts unretargeted rather than half-retargeted.
+                    logger.warning("Re-import failed; converting without retargeting")
+        else:
+            logger.warning("Rig report failed; converting without retargeting")
+
+        # Put the config back before the conversion phase reads it.
+        generate_converter_config(
+            project_dir, pack_name, keep_meshes_together, mesh_format,
+            filter_pattern, mesh_scale, output_subfolder, flatten_output,
+            dry_run, mode=mode, animation_libraries=animation_libraries,
+        )
 
     # Phase 2: Convert
     convert_cmd = [
@@ -2339,11 +2649,28 @@ def run_conversion(config: ConversionConfig) -> ConversionStats:
     # Check for existing pack to enable incremental conversion
     existing_pack = detect_existing_pack(pack_output_dir)
     skip_to_godot = all(existing_pack.values())
+
+    # Assets are all present but the metadata predates this converter, so the
+    # pack must not skip ahead: it would keep whatever fields the older version
+    # emitted forever. Everything re-runs except the FBX copy, which is the one
+    # genuinely expensive step and cannot have gone stale - the files are there.
+    refresh_metadata = (
+        not skip_to_godot
+        and not existing_pack["has_current_metadata"]
+        and all(
+            value
+            for key, value in existing_pack.items()
+            if key != "has_current_metadata"
+        )
+    )
+
     if skip_to_godot:
         logger.info("Existing pack detected with all prerequisites - skipping to mesh generation")
         logger.info("  Materials: %s, Textures: %s, Models: %s, Mapping: %s",
                     existing_pack["has_materials"], existing_pack["has_textures"],
                     existing_pack["has_models"], existing_pack["has_mapping"])
+    elif refresh_metadata:
+        logger.info("Existing pack has outdated metadata - regenerating it (FBX copy skipped)")
 
     # Store temp dir path for cleanup (always runs via finally, even on error)
     temp_dir_to_cleanup = None
@@ -2597,7 +2924,7 @@ def run_conversion(config: ConversionConfig) -> ConversionStats:
 
             # Step 9: Copy FBX files
             # Simplified approach: find ALL .fbx files recursively, preserving relative path structure
-            if not config.skip_fbx_copy:
+            if not config.skip_fbx_copy and not refresh_metadata:
                 # Find all FBX files recursively from source root
                 # Note: On Windows, rglob is case-insensitive so *.fbx matches *.FBX
                 fbx_files = list(config.source_files.rglob("*.fbx"))
@@ -2681,6 +3008,127 @@ def run_conversion(config: ConversionConfig) -> ConversionStats:
                             )
                             logger.info("Wrote %d character definition(s)", len(char_defs))
 
+                        # Sidekick packs ship characters as .sk recipes naming
+                        # one part FBX per body slot. Resolution scans the
+                        # pack's models/ directory, which Step 9 has already
+                        # populated - package asset paths would not match,
+                        # because copy_fbx_files() rewrites them.
+                        sk_recipes = build_sidekick_recipes(
+                            guid_map,
+                            [config.source_files],
+                            pack_output_dir / "models",
+                        )
+                        if sk_recipes:
+                            write_sidekick_characters_json(
+                                sk_recipes,
+                                pack_output_dir / "sidekick_characters.json",
+                            )
+                            logger.info(
+                                "Wrote %d Sidekick character recipe(s)",
+                                len(sk_recipes),
+                            )
+
+                            # Proportions reshape the body mesh but leave the
+                            # attachment joints where they were, so gear floats
+                            # off a heavy character. Synty keeps the per-joint
+                            # corrections in its tool database, which ships in
+                            # the user's Unity project rather than the package -
+                            # so this is available only via --source-files.
+                            sk_database = find_sidekick_database([config.source_files])
+                            if sk_database:
+                                sk_adjustments = load_rig_adjustments(sk_database)
+                                if sk_adjustments:
+                                    write_sidekick_rig_adjustments_json(
+                                        sk_adjustments,
+                                        pack_output_dir / "sidekick_rig_adjustments.json",
+                                    )
+                                    logger.info(
+                                        "Wrote joint adjustments for %d bone(s)",
+                                        len(sk_adjustments),
+                                    )
+                                    # Also to the output root, for the runtime
+                                    # node: the data is database-derived and
+                                    # global, like the gear sets and colour
+                                    # tables. The per-pack copy stays, because
+                                    # the baked character scenes read it there.
+                                    write_sidekick_rig_adjustments_json(
+                                        sk_adjustments,
+                                        pack_output_dir.parent
+                                        / "sidekick_rig_adjustments.json",
+                                    )
+
+                                # Gear sets and colour tables describe the whole
+                                # shared part library, not this pack, so they go
+                                # to the output root. Every Sidekick pack derives
+                                # identical content from the same database, which
+                                # makes rewriting them idempotent, not a conflict.
+                                output_root = pack_output_dir.parent
+                                sk_sets = load_part_presets(sk_database)
+                                if sk_sets:
+                                    write_sidekick_gear_sets_json(
+                                        sk_sets, output_root / "sidekick_gear_sets.json"
+                                    )
+                                    logger.info("Wrote %d gear set(s)", len(sk_sets))
+
+                                sk_colors = load_color_tables(sk_database)
+                                if sk_colors["properties"]:
+                                    write_sidekick_colors_json(
+                                        sk_colors, output_root / "sidekick_colors.json"
+                                    )
+                                    logger.info(
+                                        "Wrote %d colour propert(ies)",
+                                        len(sk_colors["properties"]),
+                                    )
+
+                                # The master palette defines every colour slot,
+                                # so any mix of parts renders against it without
+                                # a red texel. Per-character palettes are
+                                # recolours of it.
+                                sk_master = find_master_color_map([config.source_files])
+                                if sk_master:
+                                    parts_dir = output_root / SIDEKICK_PARTS_DIRNAME
+                                    parts_dir.mkdir(parents=True, exist_ok=True)
+                                    shutil.copy2(
+                                        sk_master,
+                                        parts_dir / "T_SidekickMaster_ColorMap.png",
+                                    )
+                                    logger.info("Copied master Sidekick palette")
+                            else:
+                                logger.debug(
+                                    "No Sidekick tool database under --source-files; "
+                                    "attachment joints will not follow body size"
+                                )
+                                # No database means no curated sets, but the part
+                                # names alone still group into usable ones.
+                                #
+                                # Guarded on absence: a pack converted with a
+                                # database may already have written the richer
+                                # file into this same shared root, and a
+                                # name-derived one must not clobber it.
+                                gear_path = (
+                                    pack_output_dir.parent / "sidekick_gear_sets.json"
+                                )
+                                if not gear_path.is_file():
+                                    fbx_names = [
+                                        path.stem
+                                        for path in (
+                                            pack_output_dir / "models"
+                                        ).rglob("*.fbx")
+                                    ]
+                                    fallback_sets = derive_gear_sets_from_names(fbx_names)
+                                    if fallback_sets:
+                                        write_sidekick_gear_sets_json(
+                                            fallback_sets, gear_path
+                                        )
+                                        logger.info(
+                                            "Wrote %d name-derived gear set(s)",
+                                            len(fallback_sets),
+                                        )
+
+                        # Stamped last: the pack only counts as current once
+                        # every metadata file above has actually been written.
+                        write_pack_metadata(pack_output_dir)
+
                     # Check for missing material references (no placeholders - just warn)
                     if not config.dry_run:
                         logger.debug("Checking for missing material references...")
@@ -2757,6 +3205,7 @@ def run_conversion(config: ConversionConfig) -> ConversionStats:
                 config.godot_timeout,
                 config.dry_run,
                 skip_import=config.skip_godot_import,
+                retarget=config.retarget,
                 keep_meshes_together=config.keep_meshes_together,
                 mesh_format=config.mesh_format,
                 filter_pattern=config.filter_pattern,
@@ -2786,6 +3235,17 @@ def run_conversion(config: ConversionConfig) -> ConversionStats:
                 logger.debug("Generated %d .tscn scene files", stats.meshes_converted)
             else:
                 logger.debug("No mesh files generated")
+
+            # Staging FBX are no longer referenced by anything once the
+            # scenes exist. Never prune a failed run: that would delete the
+            # inputs needed to retry it.
+            if config.prune_models:
+                if should_prune_models(stats):
+                    prune_pack_models(pack_output_dir, config.dry_run)
+                else:
+                    logger.warning(
+                        "Not pruning models/: conversion did not complete cleanly"
+                    )
         else:
             logger.info("Step 12: Skipping Godot CLI...")
 

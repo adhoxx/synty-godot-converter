@@ -64,6 +64,10 @@ var errors: int = 0
 ## converter.py can show examples without scraping the console.
 var reported_messages: PackedStringArray = PackedStringArray()
 
+## Repeat count per distinct recorded message, so the cap counts sentences
+## rather than occurrences.
+var _message_counts := {}
+
 ## Cap on reported_messages. A pack where every character fails would
 ## otherwise put thousands of lines through the summary line.
 const MAX_REPORTED_MESSAGES := 25
@@ -75,6 +79,18 @@ var collision_material: StandardMaterial3D = null
 ## Current pack folder being processed (e.g., "res://PolygonNature_SourceFiles").
 ## Used for resolving material paths relative to the pack.
 var current_pack_folder: String = ""
+
+## True while processing a pack whose Sidekick recipes the Python side wrote.
+## Part FBX in such a pack go to the shared library instead of the static path.
+var is_sidekick_pack: bool = false
+
+## Parts written to the shared library this run, and parts an earlier pack
+## already wrote. Both ride out in GODOT_SUMMARY.
+var sidekick_parts_written: int = 0
+var sidekick_parts_skipped: int = 0
+
+## Part name to its index entry, merged into sidekick_parts.json per pack.
+var sidekick_part_index: Dictionary = {}
 
 ## Character definitions for this pack, from character_definitions.json.
 ## Maps definition name -> {source_fbx, skinned, attachments}.
@@ -102,6 +118,10 @@ var default_material_name: String = ""
 ## - output_subfolder: Optional subfolder prepended to pack names.
 ## - retain_subfolders: If true, preserve Source_Files/FBX/ subdirectory structure.
 var config_pack_name: String = ""
+
+## When true, report each skinned FBX's rig and stop, rather than converting.
+## The Python side resolves bone maps from that report between import passes.
+var config_rig_report: bool = false
 var config_keep_meshes_together: bool = false
 var config_mesh_format: String = "tscn"
 var config_filter_pattern: String = ""
@@ -116,6 +136,11 @@ var config_animation_libraries: Array = []
 ## (root, pelvis, thigh_l) - so a couple of hits is conclusive.
 const POLYGON_RIG_PROBE := ["Hips", "Spine_01", "Clavicle_L", "Ankle_L"]
 const SIDEKICK_RIG_PROBE := ["pelvis", "thigh_l", "calf_l", "ball_l"]
+
+## Bone names unique to a rig that has been retargeted onto
+## SkeletonProfileHumanoid. `Hips` survives retargeting unchanged, so it proves
+## nothing on its own; these four exist only under the profile.
+const HUMANOID_RIG_PROBE := ["UpperChest", "LeftUpperArm", "RightUpperLeg", "LeftFoot"]
 
 
 ## Loads configuration options from converter_config.json.
@@ -175,6 +200,7 @@ func load_converter_config() -> bool:
 	config_retain_subfolders = not flatten_val
 	config_mode = data.get("mode", "assets")
 	config_animation_libraries = data.get("animation_libraries", [])
+	config_rig_report = data.get("rig_report", false)
 
 	print("Config loaded:")
 	if not config_pack_name.is_empty():
@@ -246,6 +272,12 @@ func _init() -> void:
 
 	print("")
 
+	if config_rig_report:
+		write_rig_report(pack_folders, "res://rig_report.json")
+		print_summary()
+		quit(0)
+		return
+
 	# Process each pack folder
 	for pack_folder in pack_folders:
 		process_pack_folder(pack_folder)
@@ -301,6 +333,12 @@ func process_pack_folder(pack_folder: String) -> void:
 	print("Processing pack: %s" % pack_folder)
 	current_pack_folder = pack_folder
 
+	# A Sidekick pack is one whose recipes the Python side wrote.
+	# pack_folder already carries the res:// prefix, the way
+	# build_sidekick_characters() reads it.
+	is_sidekick_pack = FileAccess.file_exists(pack_folder + "/sidekick_characters.json")
+	sidekick_part_index.clear()
+
 	# Animation packs carry no materials or meshes to place - only clip FBX.
 	# process_animation_pack() reads current_pack_folder, so this must come
 	# after the assignment above.
@@ -334,6 +372,10 @@ func process_pack_folder(pack_folder: String) -> void:
 
 	if fbx_files.is_empty():
 		print("  No FBX files found in %s" % models_path)
+		# A filter naming a Sidekick character matches no FBX basename, so
+		# returning here would skip the pack-level pass that builds it.
+		build_sidekick_characters(pack_folder)
+		write_sidekick_parts_index()
 		return
 
 	var total_fbx := fbx_files.size()
@@ -343,6 +385,12 @@ func process_pack_folder(pack_folder: String) -> void:
 		var fbx_path := fbx_files[i]
 		print("[%d/%d] Processing: %s" % [i + 1, total_fbx, fbx_path.get_file()])
 		process_fbx_file(fbx_path)
+
+	# Sidekick characters span many FBX, so they cannot be built inside the
+	# per-FBX loop above the way POLYGON characters are. They get their own
+	# pack-level pass, driven by sidekick_characters.json.
+	build_sidekick_characters(pack_folder)
+	write_sidekick_parts_index()
 
 
 ## Loads the mesh-to-material mapping from JSON file.
@@ -394,6 +442,65 @@ func load_material_mapping(pack_folder: String) -> bool:
 ## Minimum bone-name coverage before a bind is reported as suspect.
 const MIN_BONE_COVERAGE := 0.90
 
+## Minimum agreement between a character's and a library's bone rest directions.
+##
+## This measures the property that actually decides whether a clip can pose a
+## rig, which name coverage never did: almost every track is an absolute local
+## rotation, so the rests have to agree. Measured 0.997-1.000 for a retargeted
+## pair, and ~0 for Synty's raw character-vs-clip rigs, whose Spine rests are
+## orthogonal - X for the character, Y for the clips.
+const MIN_REST_AGREEMENT := 0.9
+
+## Name coverage is necessary but NOT sufficient, and must never be relaxed on
+## the strength of the names alone.
+##
+## Measured on Dark Fantasy: exempting props, fingers, eyes and eyebrows from
+## the count takes every character to 100% "structural" coverage and binds all
+## 857 clips - and the character then collapses into a flat heap the instant one
+## plays, head dropping from y=1.569 to y=0.852, level with the hips. Rendered
+## and looked at; the rest pose in the same scene is a correct A-pose.
+##
+## The reason is that only 4 bones in a library carry position tracks. Every
+## other track is an absolute local *rotation*, not a delta from rest, so a clip
+## poses only the rig whose rest orientations it was authored against. Bone names
+## carry no information about rests: this character's hips rest 0.364 from the
+## position the clips assume, on a rig 0.876 high.
+##
+## Godot's import-time retargeting is the fix that would actually lift this,
+## which is what --retarget uses.
+
+
+## Bone names a library's clips drive, keyed by library path.
+##
+## The union is a property of the library, not of the character being bound, so
+## a 22-character pack would otherwise rescan the same 346 clips 22 times.
+var _library_bones_cache := {}
+
+
+## Every bone name a library's clips drive, across all of them.
+##
+## No single clip is representative. Base Locomotion's first clip is
+## `A_BodyLook_Additive_Neut`, an additive look that touches 6 bones of the 43
+## the library uses; measuring against those 6 made two missing prop bones read
+## as 67% coverage and refused all 346 clips. Scanning every clip costs a
+## traversal once per library and removes the sampling entirely.
+func _library_bone_names(path: String, library: AnimationLibrary) -> Dictionary:
+	if _library_bones_cache.has(path):
+		return _library_bones_cache[path]
+
+	var wanted := {}
+	for anim_name in library.get_animation_list():
+		var anim := library.get_animation(anim_name)
+		if anim == null:
+			continue
+		for t in anim.get_track_count():
+			var bone := String(anim.track_get_path(t).get_concatenated_subnames())
+			if not bone.is_empty():
+				wanted[bone] = true
+
+	_library_bones_cache[path] = wanted
+	return wanted
+
 
 ## Fraction of the library's animated bone names that exist in the skeleton.
 ##
@@ -405,30 +512,21 @@ const MIN_BONE_COVERAGE := 0.90
 ## left-hand tracks to the right hand.
 ##
 ## @returns Dictionary with "coverage" (float) and "missing" (Array).
-func _animation_bone_coverage(skel: Skeleton3D, library: AnimationLibrary) -> Dictionary:
+func _animation_bone_coverage(
+	skel: Skeleton3D, library: AnimationLibrary, path: String
+) -> Dictionary:
 	var have := {}
 	for i in skel.get_bone_count():
 		have[skel.get_bone_name(i)] = true
 
-	var wanted := {}
-	for anim_name in library.get_animation_list():
-		var anim := library.get_animation(anim_name)
-		if anim == null:
-			continue
-		for t in anim.get_track_count():
-			var track_path := anim.track_get_path(t)
-			var bone := String(track_path.get_concatenated_subnames())
-			if not bone.is_empty():
-				wanted[bone] = true
-		# One animation is representative; scanning all of them on a
-		# 242-clip library is pure cost.
-		break
+	var wanted := _library_bone_names(path, library)
 
 	if wanted.is_empty():
 		return {"coverage": 1.0, "missing": []}
 
 	var missing := []
-	for bone in wanted:
+	for entry in wanted:
+		var bone: String = String(entry)
 		if not have.has(bone):
 			missing.append(bone)
 
@@ -463,6 +561,8 @@ func _bind_animation_libraries(player: AnimationPlayer, skel: Skeleton3D) -> voi
 			library_family = "Polygon"
 		elif base.ends_with("_Sidekick"):
 			library_family = "Sidekick"
+		elif base.ends_with("_Humanoid"):
+			library_family = "Humanoid"
 
 		# "Unknown" on either side means a rig we could not identify. Matching
 		# two unknowns is not evidence they are the same rig, so refuse both.
@@ -476,7 +576,26 @@ func _bind_animation_libraries(player: AnimationPlayer, skel: Skeleton3D) -> voi
 				path.get_file(), library_family, character_family])
 			continue
 
-		var report := _animation_bone_coverage(skel, library)
+		# Once both sides carry profile names, name coverage says nothing: the
+		# names were assigned by the retargeter and match by construction. What
+		# decides whether the clip poses the rig is whether the rests agree.
+		if character_family == "Humanoid":
+			var rests := _load_library_rests(path)
+			if rests.is_empty():
+				_report_warning("      Refusing %s: no rests recorded beside it" % path.get_file())
+				continue
+			var agreement := _rest_agreement(skel, rests)
+			if agreement < MIN_REST_AGREEMENT:
+				_report_warning("      Refusing %s: rest agreement %.3f (need %.2f)" % [
+					path.get_file(), agreement, MIN_REST_AGREEMENT])
+				continue
+			player.add_animation_library(base, library)
+			print("      Bound %s (%d clips, rest agreement %.3f)" % [
+				base, library.get_animation_list().size(), agreement])
+			animations_bound += 1
+			continue
+
+		var report := _animation_bone_coverage(skel, library, path)
 		var coverage: float = report["coverage"]
 		if coverage < MIN_BONE_COVERAGE:
 			# Measured: binding at 75% coverage does not produce "correct body,
@@ -497,7 +616,13 @@ func _bind_animation_libraries(player: AnimationPlayer, skel: Skeleton3D) -> voi
 		animations_bound += 1
 
 
-## Classifies a skeleton as "Polygon", "Sidekick" or "Unknown".
+## Classifies a skeleton as "Humanoid", "Polygon", "Sidekick" or "Unknown".
+##
+## "Humanoid" means the rig was retargeted onto SkeletonProfileHumanoid at import
+## and is checked first: retargeting renames a Polygon rig's bones to profile
+## names, so a retargeted character stops answering to the Polygon probe and
+## would otherwise be refused as an unidentified rig.
+##
 ## Unknown must never be bound to anything - guessing would be worse than
 ## leaving the character unanimated.
 func _detect_rig_family(skel: Skeleton3D) -> String:
@@ -507,6 +632,13 @@ func _detect_rig_family(skel: Skeleton3D) -> String:
 	var names := {}
 	for i in skel.get_bone_count():
 		names[skel.get_bone_name(i)] = true
+
+	var humanoid_hits := 0
+	for probe in HUMANOID_RIG_PROBE:
+		if names.has(probe):
+			humanoid_hits += 1
+	if humanoid_hits >= 3:
+		return "Humanoid"
 
 	var polygon_hits := 0
 	for probe in POLYGON_RIG_PROBE:
@@ -558,6 +690,7 @@ func process_animation_pack(pack_folder: String) -> void:
 
 	var libraries: Dictionary = {}
 	var clip_counts: Dictionary = {}
+	var family_rests: Dictionary = {}
 	var skipped := 0
 
 	for i in range(fbx_files.size()):
@@ -577,10 +710,17 @@ func process_animation_pack(pack_folder: String) -> void:
 			inst.free()
 			continue
 
-		var family := _detect_rig_family(_find_skeleton(inst))
+		var clip_skeleton := _find_skeleton(inst)
+		var family := _detect_rig_family(clip_skeleton)
 		if not libraries.has(family):
 			libraries[family] = AnimationLibrary.new()
 			clip_counts[family] = 0
+			# Capture the rests now, not the node: `inst` is freed at the end
+			# of this iteration. One clip's rig stands for the family's - every
+			# clip in a pack is authored against the same skeleton, which is
+			# what makes the rests a property of the library.
+			if clip_skeleton != null:
+				family_rests[family] = _skeleton_rests(clip_skeleton)
 
 		var library: AnimationLibrary = libraries[family]
 		for anim_name in player.get_animation_list():
@@ -607,6 +747,8 @@ func process_animation_pack(pack_folder: String) -> void:
 		var save_result := ResourceSaver.save(libraries[family], out_path)
 		if save_result == OK:
 			print("  Saved %s (%d clips)" % [out_path, clip_counts[family]])
+			if family_rests.has(family):
+				write_library_rests(family_rests[family], out_path)
 			if family == "Unknown":
 				# Saved so the clips are not lost, but binding refuses any
 				# family it cannot identify, so this file can never attach.
@@ -743,9 +885,11 @@ func process_fbx_file(fbx_path: String) -> void:
 	var consumed := {}
 	for def_name in character_definitions:
 		var def: Dictionary = character_definitions[def_name]
-		# Compare against the path relative to models/, not the basename:
-		# Characters.fbx and FixedScale/Characters.fbx share a basename.
-		if String(def.get("source_fbx", "")) != relative_path.get_basename():
+		# Compare against the path relative to the pack's Models/ directory.
+		# Not the bare filename: packs ship both Models/Characters.fbx and
+		# Models/FixedScale/Characters.fbx, and matching on the filename builds
+		# every character twice from the wrong source.
+		if String(def.get("source_fbx", "")) != _models_relative(relative_path):
 			continue
 		if not config_filter_pattern.is_empty() and not String(def_name).containsn(config_filter_pattern):
 			continue
@@ -764,6 +908,14 @@ func process_fbx_file(fbx_path: String) -> void:
 		for mesh_instance in mesh_instances:
 			if consumed.has(String(mesh_instance.name)):
 				continue
+			# Sidekick parts go to the shared library as skinned scenes instead.
+			# The bare MeshInstance3D the static path writes carries no skin and
+			# no skeleton, so nothing can be assembled from it.
+			if is_sidekick_pack and is_sidekick_part_name(String(mesh_instance.name)):
+				var part_skeleton := _find_part_skeleton(mesh_instance)
+				if part_skeleton != null:
+					save_sidekick_part(mesh_instance, part_skeleton)
+					continue
 			extract_and_save_mesh(mesh_instance, relative_dir, fbx_name)
 
 	# Clean up
@@ -1777,11 +1929,35 @@ func _report_warning(message: String) -> void:
 	printerr(message)
 
 
-## Keeps a message for GODOT_SUMMARY, up to MAX_REPORTED_MESSAGES.
+## Keeps a message for GODOT_SUMMARY, up to MAX_REPORTED_MESSAGES distinct ones.
+##
+## Counting repeats rather than listing them is what keeps the cap useful: a
+## pack of 22 characters produced 22 identical refusals per library, which
+## filled all 25 slots with one sentence and hid every other warning.
+##
 ## @param message Text to keep; leading indentation is trimmed.
 func _record_message(message: String) -> void:
-	if reported_messages.size() < MAX_REPORTED_MESSAGES:
-		reported_messages.append(message.strip_edges())
+	var text := message.strip_edges()
+	if _message_counts.has(text):
+		_message_counts[text] += 1
+		return
+	if _message_counts.size() >= MAX_REPORTED_MESSAGES:
+		return
+	_message_counts[text] = 1
+	reported_messages.append(text)
+
+
+## Recorded messages with their repeat counts appended.
+func _summarised_messages() -> Array:
+	var out := []
+	for entry in reported_messages:
+		var text: String = String(entry)
+		var count: int = _message_counts.get(text, 1)
+		if count > 1:
+			out.append("%s (x%d)" % [text, count])
+		else:
+			out.append(text)
+	return out
 
 
 ## Prints a summary of the conversion process.
@@ -1818,9 +1994,11 @@ func print_summary() -> void:
 		"meshes_skipped": meshes_skipped,
 		"characters_saved": characters_saved,
 		"animations_bound": animations_bound,
+		"sidekick_parts_written": sidekick_parts_written,
+		"sidekick_parts_skipped": sidekick_parts_skipped,
 		"warnings": warnings,
 		"errors": errors,
-		"messages": reported_messages,
+		"messages": _summarised_messages(),
 	}))
 
 	if errors > 0:
@@ -1832,3 +2010,770 @@ func print_summary() -> void:
 	else:
 		print("")
 		print("All meshes converted successfully!")
+
+
+## The shared parts library, at the output root beside res://animations/.
+##
+## Sidekick packs ship a common part pool duplicated about fourfold, so the
+## library is shared rather than per-pack. The Godot script runs with
+## --path <output root>, so res:// IS that root. Mirrors SIDEKICK_PARTS_DIRNAME
+## in sidekick.py.
+const SIDEKICK_PARTS_DIR := "res://sidekick_parts"
+
+## Slot codes embedded in Sidekick part names, e.g. SK_FANT_KNGT_01_10TORS_HU01.
+##
+## Mirrors SIDEKICK_SLOT_CODES in sidekick.py. Demo and FX meshes share the SK_
+## prefix without being parts, so the code - not the prefix - is the test.
+const SIDEKICK_SLOT_CODES := {
+	"01HEAD": "Head", "02HAIR": "Hair", "03EBRL": "EyebrowLeft",
+	"04EBRR": "EyebrowRight", "05EYEL": "EyeLeft", "06EYER": "EyeRight",
+	"07EARL": "EarLeft", "08EARR": "EarRight", "09FCHR": "FacialHair",
+	"10TORS": "Torso", "11AUPL": "ArmUpperLeft", "12AUPR": "ArmUpperRight",
+	"13ALWL": "ArmLowerLeft", "14ALWR": "ArmLowerRight", "15HNDL": "HandLeft",
+	"16HNDR": "HandRight", "17HIPS": "Hips", "18LEGL": "LegLeft",
+	"19LEGR": "LegRight", "20FOTL": "FootLeft", "21FOTR": "FootRight",
+	"22AHED": "AttachmentHead", "23AFAC": "AttachmentFace",
+	"24ABAC": "AttachmentBack", "25AHPF": "AttachmentHipsFront",
+	"26AHPB": "AttachmentHipsBack", "27AHPL": "AttachmentHipsLeft",
+	"28AHPR": "AttachmentHipsRight", "29ASHL": "AttachmentShoulderLeft",
+	"30ASHR": "AttachmentShoulderRight", "31AEBL": "AttachmentElbowLeft",
+	"32AEBR": "AttachmentElbowRight", "33AKNL": "AttachmentKneeLeft",
+	"34AKNR": "AttachmentKneeRight", "35NOSE": "Nose", "36TETH": "Teeth",
+	"37TONG": "Tongue", "38WRAP": "Wrap",
+}
+
+
+## Splits a Sidekick part name into its components.
+##
+## Names are not one fixed shape. Most read SK_<FAMILY>_<NN>_<CODE>_<SPECIES>,
+## but some carry an extra prefix and no species - SK_SPEC_HUMN_BASE_01_10TORS,
+## SK_FUTR_APOC_OUTL_06_28AHPR - and reading fixed positions drops those
+## silently. So the slot code is located wherever it sits and everything else is
+## read around it. Mirrors parse_part_name() in sidekick.py.
+##
+## @param mesh_name e.g. "SK_FANT_KNGT_01_10TORS_HU01".
+## @returns {slot, family, set, species}, or an empty Dictionary when the name
+## carries no slot code.
+func sidekick_parse_part_name(mesh_name: String) -> Dictionary:
+	var bits := mesh_name.split("_")
+	if bits.size() < 4 or bits[0] != "SK":
+		return {}
+	for index in range(2, bits.size()):
+		var slot := String(SIDEKICK_SLOT_CODES.get(bits[index], ""))
+		if slot.is_empty():
+			continue
+		var family := ""
+		for i in range(1, index - 1):
+			family += bits[i] if family.is_empty() else "_" + bits[i]
+		return {
+			"slot": slot,
+			"family": family,
+			"set": bits[index - 1],
+			"species": bits[index + 1] if index + 1 < bits.size() else "",
+		}
+	return {}
+
+
+## Reads the body slot out of a Sidekick part name.
+##
+## @param mesh_name e.g. "SK_FANT_KNGT_01_10TORS_HU01".
+## @returns The slot name, or "" when the name is not a part.
+func sidekick_slot_of(mesh_name: String) -> String:
+	var parsed := sidekick_parse_part_name(mesh_name)
+	return String(parsed.get("slot", ""))
+
+
+func is_sidekick_part_name(mesh_name: String) -> bool:
+	return sidekick_slot_of(mesh_name) != ""
+
+
+## Finds the Skeleton3D a mesh instance is skinned to.
+##
+## @param mesh_instance A skinned MeshInstance3D inside its imported scene.
+## @returns The skeleton, or null when the path does not resolve.
+func _find_part_skeleton(mesh_instance: MeshInstance3D) -> Skeleton3D:
+	if mesh_instance.skeleton.is_empty():
+		return null
+	return mesh_instance.get_node_or_null(mesh_instance.skeleton) as Skeleton3D
+
+
+## Builds one part's index entry.
+##
+## @param part_name The part's name.
+## @param skeleton The skeleton stored with it.
+## @param mesh The part mesh.
+## @param output_path Its resource path.
+func _sidekick_index_entry(
+		part_name: String, skeleton: Skeleton3D, mesh: Mesh, output_path: String) -> Dictionary:
+	var bone_names: Array[String] = []
+	for i in range(skeleton.get_bone_count()):
+		bone_names.append(skeleton.get_bone_name(i))
+	var shape_names: Array[String] = []
+	if mesh != null:
+		for i in range(mesh.get_blend_shape_count()):
+			shape_names.append(String(mesh.get_blend_shape_name(i)))
+	var parsed := sidekick_parse_part_name(part_name)
+	return {
+		"slot": String(parsed.get("slot", "")),
+		"family": String(parsed.get("family", "")),
+		"set": String(parsed.get("set", "")),
+		"species": String(parsed.get("species", "")),
+		"bones": bone_names,
+		"blend_shapes": shape_names,
+		"path": output_path,
+	}
+
+
+## Adds an already-written part to the index by loading it back.
+##
+## @param part_name The part's name.
+## @param output_path Its resource path.
+func _index_existing_sidekick_part(part_name: String, output_path: String) -> void:
+	var scene := load(output_path) as PackedScene
+	if scene == null:
+		_report_warning("    WARNING: could not reload part %s" % part_name)
+		return
+	var root := scene.instantiate() as Skeleton3D
+	if root == null:
+		_report_warning("    WARNING: part %s has no skeleton" % part_name)
+		return
+	var part := root.get_child(0) as MeshInstance3D
+	var mesh: Mesh = part.mesh if part != null else null
+	sidekick_part_index[part_name] = _sidekick_index_entry(
+		part_name, root, mesh, output_path)
+	root.free()
+
+
+## Saves one part as a self-contained, skinnable scene.
+##
+## The scene is the part's own Skeleton3D with the MeshInstance3D and its skin
+## beneath it. That is everything a runtime needs to graft the part onto another
+## character: skin binds resolve by bone name, and grafting a missing bone needs
+## its rest and its parent, which a Skin does not carry.
+##
+## The skeleton is stored as imported rather than trimmed to the bones the skin
+## binds. Measured across 424 parts, a skin binds 87.4 of a 104.1-bone skeleton -
+## Synty skins every part to nearly the whole core rig - so trimming saves about
+## 1% of a part resource while risking a graft whose parent was trimmed away.
+##
+## @param mesh_instance The part mesh, still inside its imported scene.
+## @param source_skeleton The skeleton that mesh_instance is skinned to.
+## @returns bool True when a file was written.
+func save_sidekick_part(mesh_instance: MeshInstance3D, source_skeleton: Skeleton3D) -> bool:
+	var part_name := String(mesh_instance.name)
+	if mesh_instance.mesh == null or mesh_instance.skin == null:
+		_report_warning("    WARNING: %s has no mesh or skin; not a usable part" % part_name)
+		return false
+
+	_ensure_directory_exists(SIDEKICK_PARTS_DIR)
+	var output_path := SIDEKICK_PARTS_DIR + "/" + part_name + ".res"
+
+	# Packs share one part pool, so the fourth pack to reach a part has nothing
+	# to add. The index must still name it, or this pack's parts would be
+	# missing from it.
+	if ResourceLoader.exists(output_path):
+		if not sidekick_part_index.has(part_name):
+			_index_existing_sidekick_part(part_name, output_path)
+		sidekick_parts_skipped += 1
+		return false
+
+	var skeleton := Skeleton3D.new()
+	skeleton.name = "Skeleton3D"
+	for i in range(source_skeleton.get_bone_count()):
+		skeleton.add_bone(source_skeleton.get_bone_name(i))
+		skeleton.set_bone_parent(i, source_skeleton.get_bone_parent(i))
+		skeleton.set_bone_rest(i, source_skeleton.get_bone_rest(i))
+		skeleton.reset_bone_pose(i)
+
+	var part := MeshInstance3D.new()
+	part.name = part_name
+	part.mesh = mesh_instance.mesh
+	skeleton.add_child(part)
+	part.owner = skeleton
+	# skin binds only once the node is in the tree; assigning it before
+	# add_child() leaves the part in bind pose while the skeleton animates.
+	part.skin = mesh_instance.skin
+
+	var scene := PackedScene.new()
+	if scene.pack(skeleton) != OK:
+		_report_error("    ERROR: could not pack part %s" % part_name)
+		skeleton.free()
+		return false
+
+	var save_result := ResourceSaver.save(scene, output_path, ResourceSaver.FLAG_COMPRESS)
+	if save_result != OK:
+		_report_error("    ERROR: could not save part %s (%d)" % [part_name, save_result])
+		skeleton.free()
+		return false
+
+	sidekick_part_index[part_name] = _sidekick_index_entry(
+		part_name, skeleton, mesh_instance.mesh, output_path)
+	skeleton.free()
+	sidekick_parts_written += 1
+	return true
+
+
+## Merges this run's parts into the shared index at the output root.
+##
+## Merging rather than overwriting is what lets each pack contribute its parts
+## without erasing another's - the library spans every converted pack.
+func write_sidekick_parts_index() -> void:
+	if sidekick_part_index.is_empty():
+		return
+	var index_path := "res://sidekick_parts.json"
+	var merged := {}
+	if FileAccess.file_exists(index_path):
+		var existing = JSON.parse_string(FileAccess.get_file_as_string(index_path))
+		if existing is Dictionary:
+			merged = existing
+	for part_name in sidekick_part_index:
+		merged[part_name] = sidekick_part_index[part_name]
+
+	var file := FileAccess.open(index_path, FileAccess.WRITE)
+	if file == null:
+		_report_error("    ERROR: could not write %s" % index_path)
+		return
+	file.store_string(JSON.stringify(merged, "  "))
+	file.close()
+	print("    Indexed %d Sidekick part(s) (%d total)" % [
+		sidekick_part_index.size(), merged.size()])
+
+
+## Builds every Sidekick character described by sidekick_characters.json.
+##
+## Absence of the file is normal - only SIDEKICK packs carry recipes.
+##
+## @param pack_folder Resource path to the pack folder.
+func build_sidekick_characters(pack_folder: String) -> void:
+	var path := pack_folder + "/sidekick_characters.json"
+	if not FileAccess.file_exists(path):
+		return
+
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		_report_warning("Failed to open %s" % path)
+		return
+
+	var json := JSON.new()
+	if json.parse(file.get_as_text()) != OK:
+		_report_error("Failed to parse sidekick_characters.json: %s" % json.get_error_message())
+		return
+
+	var data = json.data
+	if not data is Dictionary:
+		_report_error("Invalid sidekick_characters.json: expected Dictionary")
+		return
+
+	print("  Loaded %d Sidekick character recipe(s)" % data.size())
+
+	# Per-pack, not per-character: every character shares these maxima and
+	# scales them by its own proportions.
+	var adjustments := _load_sidekick_rig_adjustments(pack_folder)
+
+	for name in data:
+		if not config_filter_pattern.is_empty() and not String(name).containsn(config_filter_pattern):
+			continue
+		_build_sidekick_character(pack_folder, String(name), data[name], adjustments)
+
+
+## Assembles one Sidekick character: every part mesh onto a single skeleton.
+##
+## Sidekick ships a character as one FBX per body slot, all skinned to the same
+## rig, so the character is rebuilt by copying each part's mesh onto one
+## skeleton taken from the first part.
+##
+## @param pack_folder Resource path to the pack folder.
+## @param char_name Character name, used for the scene and material.
+## @param recipe Dictionary with "parts", "color_map" and "blend_shapes".
+## @param adjustments Per-joint movement maxima from the Sidekick database.
+## @returns bool True if a scene was saved.
+func _build_sidekick_character(pack_folder: String, char_name: String, recipe: Dictionary, adjustments: Dictionary = {}) -> bool:
+	var parts: Array = recipe.get("parts", [])
+	if parts.is_empty():
+		_report_error("    ERROR: Sidekick character %s has no parts" % char_name)
+		return false
+
+	if String(recipe.get("color_map", "")).is_empty():
+		_report_warning("    WARNING: %s has no colour palette; it will be untextured" % char_name)
+
+	var root := Node3D.new()
+	root.name = char_name
+	var skel: Skeleton3D = null
+	var placed := 0
+
+	for entry in parts:
+		var part: Dictionary = entry
+		var relative := String(part.get("fbx", ""))
+		if relative.is_empty():
+			_report_warning("    WARNING: %s part %s has no FBX; skipping" % [
+				char_name, String(part.get("mesh", "?"))])
+			continue
+
+		var fbx_path := "%s/models/%s.fbx" % [pack_folder, relative]
+		var packed: PackedScene = load(fbx_path)
+		if packed == null:
+			_report_warning("    WARNING: %s could not load part %s" % [char_name, fbx_path])
+			continue
+		var instance := packed.instantiate()
+
+		if skel == null:
+			# The first part donates the skeleton. duplicate() preserves bone
+			# rests exactly; its children are the donor's own meshes, which the
+			# loop below re-adds deliberately.
+			var source_skel := _find_skeleton(instance)
+			if source_skel == null:
+				_report_warning("    WARNING: %s part %s has no Skeleton3D" % [char_name, relative])
+				instance.free()
+				continue
+			skel = source_skel.duplicate() as Skeleton3D
+			if skel == null:
+				_report_error("    ERROR: could not duplicate skeleton for %s" % char_name)
+				instance.free()
+				root.free()
+				return false
+			for child in skel.get_children():
+				skel.remove_child(child)
+				child.queue_free()
+			skel.name = "Skeleton3D"
+			root.add_child(skel)
+		else:
+			# Parts do not all ship the same rig. The 88-bone base is common,
+			# but pouches, capes and hip attachments each add dynamic bones of
+			# their own. Skin binds resolve by name, so a part whose bones the
+			# donor lacks binds to nothing and renders detached from the body.
+			var part_skel := _find_skeleton(instance)
+			if part_skel != null:
+				_graft_missing_bones(skel, part_skel)
+
+		for mesh_instance in find_mesh_instances(instance):
+			if mesh_instance.skin == null or mesh_instance.mesh == null:
+				continue
+			var copy := MeshInstance3D.new()
+			copy.mesh = mesh_instance.mesh
+			copy.name = "%s_%s" % [String(part.get("slot", "Part")), mesh_instance.name]
+			for surface in range(mesh_instance.mesh.get_surface_count()):
+				copy.set_surface_override_material(surface, mesh_instance.get_active_material(surface))
+			skel.add_child(copy)
+			# skin binds to the skeleton only once the node is inside the tree.
+			# Assigning it before add_child() leaves the part frozen in bind
+			# pose while the skeleton animates - a silent, visible failure.
+			copy.skeleton = copy.get_path_to(skel)
+			copy.skin = mesh_instance.skin
+			_apply_sidekick_proportions(copy, recipe.get("blend_shapes", {}))
+			placed += 1
+
+		instance.free()
+
+	if skel == null or placed == 0:
+		_report_error("    ERROR: Sidekick character %s produced no meshes" % char_name)
+		root.free()
+		return false
+
+	# Only once every part has been placed, so grafted bones exist and the
+	# skins that follow these joints are already bound.
+	_apply_sidekick_joint_adjustments(skel, recipe.get("blend_shapes", {}), adjustments)
+
+	# Usually the character name, but Synty sometimes numbers a recipe with
+	# a variant suffix its assets do not carry.
+	_apply_sidekick_material(pack_folder, String(recipe.get("material", char_name)), skel)
+
+	var player := AnimationPlayer.new()
+	player.name = "AnimationPlayer"
+	root.add_child(player)
+	_bind_animation_libraries(player, skel)
+
+	# Scale belongs on the root: baking it into skinned vertices while leaving
+	# bone rests untouched breaks the bind pose.
+	if config_mesh_scale != 1.0:
+		root.scale = Vector3.ONE * config_mesh_scale
+
+	_set_owner_recursive(root, root)
+
+	var meshes_dir := current_pack_folder + "/meshes/" + _get_mesh_subfolder()
+	var output_path := "%s/%s.%s" % [meshes_dir, char_name, config_mesh_format]
+	_ensure_directory_exists(output_path.get_base_dir())
+
+	var bone_count := skel.get_bone_count()
+
+	var scene := PackedScene.new()
+	if scene.pack(root) != OK:
+		_report_error("    ERROR: failed to pack Sidekick scene: %s" % char_name)
+		root.free()
+		return false
+
+	var save_result := ResourceSaver.save(scene, output_path)
+	root.free()
+
+	if save_result != OK:
+		_report_error("    ERROR: failed to save Sidekick scene: %s" % char_name)
+		return false
+
+	print("      Saved Sidekick character: %s (%d parts, %d bones)" % [
+		char_name, placed, bone_count])
+	characters_saved += 1
+	meshes_saved += 1
+	return true
+
+
+## Applies the character's own material to every assembled part.
+##
+## Sidekick colours a whole character from one baked 32x32 palette that all its
+## parts' UVs index into, so every part takes the same material.
+##
+## @param pack_folder Resource path to the pack folder.
+## @param material_name Name the material ships under, which is not always
+##        the character name.
+## @param skel Skeleton whose MeshInstance3D children receive the material.
+func _apply_sidekick_material(pack_folder: String, material_name: String, skel: Skeleton3D) -> void:
+	var material_path := "%s/materials/%s.tres" % [pack_folder, material_name]
+	if not ResourceLoader.exists(material_path):
+		_report_warning("    WARNING: no material for Sidekick character %s" % material_name)
+		return
+	var material: Material = load(material_path)
+	if material == null:
+		_report_warning("    WARNING: could not load material for %s" % material_name)
+		return
+	for child in skel.get_children():
+		if not (child is MeshInstance3D):
+			continue
+		var mesh_instance := child as MeshInstance3D
+		if mesh_instance.mesh == null:
+			continue
+		for surface in range(mesh_instance.mesh.get_surface_count()):
+			mesh_instance.set_surface_override_material(surface, material)
+
+
+## Copies bones present in a part's rig but missing from the assembled one.
+##
+## Sidekick parts share an 88-bone base rig, but attachments add dynamic
+## bones of their own (a cape's abac_dyn_* chain, a hip pouch's ahpl_dyn_01).
+## Skin binds resolve by name, so a part whose bones the skeleton lacks binds
+## to nothing and renders detached. Every such chain roots in a bone the base
+## rig already has, so the missing bones graft on directly.
+##
+## Bones are appended, so existing indices - and the skins already bound to
+## them - are unaffected.
+##
+## @param skel The assembled skeleton, modified in place.
+## @param part_skel The part's own skeleton to take missing bones from.
+## @returns int Number of bones added.
+func _graft_missing_bones(skel: Skeleton3D, part_skel: Skeleton3D) -> int:
+	var added := 0
+	# Godot orders bones parents-first, so a parent is always already present
+	# by the time its child is considered.
+	for i in range(part_skel.get_bone_count()):
+		var bone_name := part_skel.get_bone_name(i)
+		if skel.find_bone(bone_name) != -1:
+			continue
+		var parent := part_skel.get_bone_parent(i)
+		if parent < 0:
+			_report_warning("    WARNING: cannot graft root bone %s" % bone_name)
+			continue
+		var parent_index := skel.find_bone(part_skel.get_bone_name(parent))
+		if parent_index == -1:
+			_report_warning("    WARNING: cannot graft bone %s: parent %s absent" % [
+				bone_name, part_skel.get_bone_name(parent)])
+			continue
+		skel.add_bone(bone_name)
+		var index := skel.get_bone_count() - 1
+		skel.set_bone_parent(index, parent_index)
+		skel.set_bone_rest(index, part_skel.get_bone_rest(i))
+		skel.reset_bone_pose(index)
+		added += 1
+	return added
+
+
+## Sets a part's proportion blend shapes from the character's recipe.
+##
+## Every body part ships the same four shapes, and Sidekick drives all of
+## them from three slider values in -100..100. The weights below mirror
+## SidekickRuntime.UpdateBlendShapes; Unity weights run 0..100 and Godot's
+## 0..1, hence the division.
+##
+## Zero is not neutral here: a default character sits at 0.5 on two of the
+## four shapes, so leaving them unset renders every character fully masculine
+## and entirely unmuscled rather than as authored.
+##
+## Facial and jaw shapes on the same mesh are left alone - they belong to
+## expression, not proportion.
+##
+## @param mesh_instance The assembled part to set values on.
+## @param shapes Dictionary with body_type, body_size and muscle.
+func _apply_sidekick_proportions(mesh_instance: MeshInstance3D, shapes: Dictionary) -> void:
+	if mesh_instance.mesh == null:
+		return
+	var body_type: float = float(shapes.get("body_type", 50.0))
+	var body_size: float = float(shapes.get("body_size", 0.0))
+	var muscle: float = float(shapes.get("muscle", 50.0))
+
+	for i in range(mesh_instance.mesh.get_blend_shape_count()):
+		# Names are prefixed per part, e.g. "HIPSBlends.defaultHeavy".
+		var shape_name := String(mesh_instance.mesh.get_blend_shape_name(i))
+		var weight := -1.0
+		if shape_name.ends_with("masculineFeminine"):
+			weight = (body_type + 100.0) / 2.0
+		elif shape_name.ends_with("defaultSkinny"):
+			weight = -body_size if body_size < 0.0 else 0.0
+		elif shape_name.ends_with("defaultHeavy"):
+			weight = body_size if body_size > 0.0 else 0.0
+		elif shape_name.ends_with("Buff"):
+			weight = (muscle + 100.0) / 2.0
+		if weight >= 0.0:
+			mesh_instance.set_blend_shape_value(i, weight / 100.0)
+
+
+## Converts a character's three proportion sliders into blend weights.
+##
+## Both the blend shapes and the joint adjustments are driven by these same
+## four weights, so they are derived in one place: a mismatch between the two
+## would move a character's gear to fit a body shape it does not have.
+##
+## @param shapes Dictionary with body_type, body_size and muscle in -100..100.
+## @returns Dictionary of weights in 0..1, keyed by blend type name.
+func _sidekick_blend_weights(shapes: Dictionary) -> Dictionary:
+	var body_type: float = float(shapes.get("body_type", 50.0))
+	var body_size: float = float(shapes.get("body_size", 0.0))
+	var muscle: float = float(shapes.get("muscle", 50.0))
+	return {
+		"feminine": (body_type + 100.0) / 200.0,
+		"heavy": body_size / 100.0 if body_size > 0.0 else 0.0,
+		"skinny": -body_size / 100.0 if body_size < 0.0 else 0.0,
+		"bulk": (muscle + 100.0) / 200.0,
+	}
+
+
+## Loads the pack's joint adjustment maxima, if it has any.
+##
+## Absence is normal: the data lives in Synty's tool database, which ships in
+## a Unity project rather than in the .unitypackage, so it is only present
+## when --source-files pointed at a project carrying the Sidekick tool.
+##
+## @param pack_folder Resource path to the pack folder.
+## @returns Dictionary of bone name to blend type to offset/rotation.
+func _load_sidekick_rig_adjustments(pack_folder: String) -> Dictionary:
+	var path := pack_folder + "/sidekick_rig_adjustments.json"
+	if not FileAccess.file_exists(path):
+		return {}
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		_report_warning("Failed to open %s" % path)
+		return {}
+	var json := JSON.new()
+	if json.parse(file.get_as_text()) != OK:
+		_report_error("Failed to parse sidekick_rig_adjustments.json: %s" % json.get_error_message())
+		return {}
+	if not json.data is Dictionary:
+		_report_error("Invalid sidekick_rig_adjustments.json: expected Dictionary")
+		return {}
+	print("  Loaded joint adjustments for %d bone(s)" % json.data.size())
+	return json.data
+
+
+## Moves the attachment joints to suit the character's proportions.
+##
+## Blend shapes reshape the body, but the joints that pouches, shoulder pads
+## and back items hang from stay where the base rig put them - so on a heavy
+## character the gear floats, and on a skinny one it sinks in. Synty corrects
+## this from its tool database; the maxima are scaled by each blend weight and
+## accumulated, mirroring ProcessRigMovementOnBlendShapeChange.
+##
+## Only the 11 attachment joints carry data. Offsets are bone-local, and the
+## blend order matters because the rotations compose.
+##
+## @param skel The assembled skeleton, modified in place.
+## @param shapes The character's proportion sliders.
+## @param adjustments Output of _load_sidekick_rig_adjustments().
+func _apply_sidekick_joint_adjustments(skel: Skeleton3D, shapes: Dictionary, adjustments: Dictionary) -> void:
+	if adjustments.is_empty():
+		return
+	var weights := _sidekick_blend_weights(shapes)
+
+	for bone_name in adjustments:
+		var index := skel.find_bone(String(bone_name))
+		if index == -1:
+			continue
+		var per_blend: Dictionary = adjustments[bone_name]
+		var rest := skel.get_bone_rest(index)
+		var origin := rest.origin
+		var rotation := rest.basis.get_rotation_quaternion()
+
+		# BlendShapeType order - the quaternion product is not commutative.
+		for blend_name in ["feminine", "heavy", "skinny", "bulk"]:
+			if not per_blend.has(blend_name):
+				continue
+			var weight: float = weights[blend_name]
+			var entry: Dictionary = per_blend[blend_name]
+			origin += _to_vector3(entry.get("offset", [])) * weight
+			var degrees := _to_vector3(entry.get("rotation", []))
+			if degrees != Vector3.ZERO:
+				var target := Quaternion.from_euler(Vector3(
+					deg_to_rad(degrees.x), deg_to_rad(degrees.y), deg_to_rad(degrees.z)))
+				rotation = rotation * Quaternion.IDENTITY.slerp(target, weight)
+
+		var new_basis := Basis(rotation).scaled(rest.basis.get_scale())
+		skel.set_bone_rest(index, Transform3D(new_basis, origin))
+		# The pose drives skinning; the rest alone would change nothing.
+		skel.reset_bone_pose(index)
+
+
+## Reads a three-element JSON array as a Vector3.
+##
+## @param values Array of three numbers; anything else yields zero.
+## @returns Vector3 The converted vector.
+func _to_vector3(values) -> Vector3:
+	if not values is Array or values.size() != 3:
+		return Vector3.ZERO
+	return Vector3(float(values[0]), float(values[1]), float(values[2]))
+
+
+## Reports every skinned FBX's bone names and global rests.
+##
+## Global rests, not just names: Synty names both hands' finger bones the same,
+## Godot dedups the second with a suffix, and the suffix number differs per file
+## (`Thumb_01_2` in a character FBX, `Thumb_01_1` in a clip FBX). Position is the
+## only reliable way to tell which one is the right hand, and getting it wrong
+## binds left-hand tracks to the right hand.
+func write_rig_report(pack_folders: Array, out_path: String) -> void:
+	var report := {}
+	var scanned := 0
+	for entry in pack_folders:
+		var pack := String(entry)
+		for fbx_path in _find_fbx_recursive(pack + "/models"):
+			scanned += 1
+			var scene := load(fbx_path) as PackedScene
+			if scene == null:
+				continue
+			var root_node := scene.instantiate()
+			var skel := _find_skeleton(root_node)
+			if skel == null:
+				root_node.free()
+				continue
+			var bones := {}
+			for i in skel.get_bone_count():
+				var origin: Vector3 = skel.get_bone_global_rest(i).origin
+				bones[skel.get_bone_name(i)] = [origin.x, origin.y, origin.z]
+			report[fbx_path] = {
+				"skeleton_path": String(root_node.get_path_to(skel)),
+				"bones": bones,
+			}
+			root_node.free()
+
+	var file := FileAccess.open(out_path, FileAccess.WRITE)
+	if file == null:
+		_report_error("  rig report: cannot write %s" % out_path)
+		return
+	file.store_string(JSON.stringify(report))
+	file.close()
+	print("  Rig report: %d skeletons from %d FBX -> %s" % [
+		report.size(), scanned, out_path])
+
+
+## Every .fbx beneath a directory, as res:// paths.
+func _find_fbx_recursive(directory: String) -> Array:
+	var found := []
+	var dir := DirAccess.open(directory)
+	if dir == null:
+		return found
+	dir.list_dir_begin()
+	var name := dir.get_next()
+	while name != "":
+		var full := directory + "/" + name
+		if dir.current_is_dir():
+			found.append_array(_find_fbx_recursive(full))
+		elif name.get_extension().to_lower() == "fbx":
+			found.append(full)
+		name = dir.get_next()
+	dir.list_dir_end()
+	return found
+
+
+## Mean agreement between a skeleton's bone rest directions and a library's.
+##
+## Compares direction rather than position so that a difference in limb length
+## between two characters does not read as an incompatible rig - that difference
+## is exactly what retargeting absorbs.
+func _rest_agreement(skel: Skeleton3D, reference: Dictionary) -> float:
+	var total := 0.0
+	var counted := 0
+	for entry in reference:
+		var bone := String(entry)
+		var index := skel.find_bone(bone)
+		if index < 0:
+			continue
+		var mine: Vector3 = skel.get_bone_rest(index).origin
+		var theirs: Vector3 = _to_vector3(reference[bone])
+		# A bone sitting on its parent has no direction to compare.
+		if mine.length() < 0.001 or theirs.length() < 0.001:
+			continue
+		total += mine.normalized().dot(theirs.normalized())
+		counted += 1
+	if counted == 0:
+		return 0.0
+	return total / float(counted)
+
+
+## Reads the rests recorded beside an animation library, if any.
+##
+## A library converted before retargeting existed has no sidecar, and keeps the
+## coverage path rather than silently changing meaning.
+func _load_library_rests(library_path: String) -> Dictionary:
+	var path := library_path.get_basename() + ".rests.json"
+	if not FileAccess.file_exists(path):
+		return {}
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		return {}
+	var parsed = JSON.parse_string(file.get_as_text())
+	file.close()
+	if not parsed is Dictionary:
+		return {}
+	return parsed
+
+
+## Records the rig a library's clips were authored against.
+##
+## An AnimationLibrary holds clips and nothing else, so the rests that decide
+## whether those clips can pose a given character have to travel beside it.
+func write_library_rests(rests: Dictionary, library_path: String) -> void:
+	if rests.is_empty():
+		return
+	var out := library_path.get_basename() + ".rests.json"
+	var file := FileAccess.open(out, FileAccess.WRITE)
+	if file == null:
+		_report_warning("  cannot write library rests: %s" % out)
+		return
+	file.store_string(JSON.stringify(rests))
+	file.close()
+
+
+
+## A skeleton's bone rest origins, as plain arrays ready for JSON.
+func _skeleton_rests(skel: Skeleton3D) -> Dictionary:
+	var rests := {}
+	if skel == null:
+		return rests
+	for i in skel.get_bone_count():
+		var origin: Vector3 = skel.get_bone_rest(i).origin
+		rests[skel.get_bone_name(i)] = [origin.x, origin.y, origin.z]
+	return rests
+
+
+## The part of an FBX's path that `character_definitions.json` records.
+##
+## Definitions name a path relative to the pack's `Models/` directory, such as
+## `Characters` or `FixedScale/Characters`. Where that directory sits under
+## `models/` depends on how the pack was sourced: a pack imported into Unity
+## lands flat, while one extracted from its .unitypackage keeps the whole Unity
+## project path, `Assets/PolygonVikings/Models/Characters.fbx`. Trimming to the
+## last `Models/` segment makes both forms match the same definition, while
+## keeping the `FixedScale/` distinction the definitions rely on.
+##
+## A path with no `Models/` segment is returned whole, minus its extension,
+## which is what the flat layout already produced.
+func _models_relative(relative_path: String) -> String:
+	var without_extension := relative_path.get_basename()
+	var marker := "Models/"
+	var cut := without_extension.rfind(marker)
+	if cut < 0:
+		return without_extension
+	return without_extension.substr(cut + marker.length())

@@ -397,6 +397,7 @@ def build_character_definitions(guid_map) -> dict[str, CharacterDefinition]:
     prefab_content = getattr(guid_map, "guid_to_prefab_content", None) or {}
     definitions: dict[str, CharacterDefinition] = {}
     skipped_low_bone_count = 0
+    skipped_non_fbx_mesh = 0
 
     for guid, content in prefab_content.items():
         pathname = guid_map.guid_to_pathname.get(guid, "")
@@ -461,7 +462,19 @@ def build_character_definitions(guid_map) -> dict[str, CharacterDefinition]:
             skipped_low_bone_count += 1
             continue
 
-        source_fbx = _models_relative_name(guid_map.guid_to_pathname.get(mesh_guid, ""))
+        mesh_path = guid_map.guid_to_pathname.get(mesh_guid, "")
+        if mesh_path and not mesh_path.lower().endswith(".fbx"):
+            # Sidekick prefabs point at a Unity-baked .asset mesh, which Godot
+            # cannot import. A definition naming it could never match a file,
+            # so it would sit in the JSON claiming a character we never build.
+            # Those characters come from .sk recipes instead - see sidekick.py.
+            logger.debug(
+                "Skipping '%s': mesh %s is not an FBX", prefab_name, mesh_path
+            )
+            skipped_non_fbx_mesh += 1
+            continue
+
+        source_fbx = _models_relative_name(mesh_path)
 
         definitions[prefab_name] = CharacterDefinition(
             name=prefab_name,
@@ -476,6 +489,12 @@ def build_character_definitions(guid_map) -> dict[str, CharacterDefinition]:
             "Skipped %d skinned prefab(s) with fewer than %d bones (cloth/FX)",
             skipped_low_bone_count,
             MIN_CHARACTER_BONES,
+        )
+    if skipped_non_fbx_mesh:
+        logger.debug(
+            "Skipped %d prefab(s) whose mesh is not an FBX (Sidekick-style "
+            "baked meshes; see sidekick.py)",
+            skipped_non_fbx_mesh,
         )
     logger.debug("Derived %d character definition(s)", len(definitions))
     return definitions

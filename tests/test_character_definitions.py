@@ -93,6 +93,8 @@ PATHNAMES = {
     "pm": "Assets/P/Prefabs/Characters/Character_Mystery.prefab",
     "cccccccccccccccccccccccccccccccc": "Assets/P/Models/FixedScale/Characters.fbx",
     "pf": "Assets/P/Prefabs/Characters/Character_Goblin_WarChief_FixedScale.prefab",
+    "dddddddddddddddddddddddddddddddd": "Assets/P/Characters/FantasyKnights_01/Meshes/FantasyKnights_01.asset",
+    "psk": "Assets/P/Characters/FantasyKnights_01/FantasyKnights_01.prefab",
 }
 
 
@@ -265,6 +267,27 @@ SkinnedMeshRenderer:
             ["b"],
         )
 
+
+    def test_ignores_prefab_whose_mesh_is_not_an_fbx(self):
+        """Sidekick prefabs point at a Unity-baked .asset mesh.
+
+        Godot cannot import .asset, so such a definition could never match a
+        file and produced a silent zero-character conversion. Sidekick
+        characters are built from .sk recipes instead.
+        """
+        data = _prefab(
+            f"""--- !u!1 &1
+GameObject:
+  m_Name: FantasyKnights_01
+  m_IsActive: 1
+--- !u!137 &2
+SkinnedMeshRenderer:
+  m_GameObject: {{fileID: 1}}
+{_bones(CHARACTER_BONES)}
+  m_Mesh: {{fileID: 1, guid: dddddddddddddddddddddddddddddddd, type: 3}}
+"""
+        )
+        assert build_character_definitions(_guid_map({"psk": data})) == {}
 
 class TestWriteCharacterDefinitionsJson:
     def test_writes_expected_json_shape(self, tmp_path):
