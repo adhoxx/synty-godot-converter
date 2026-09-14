@@ -97,12 +97,13 @@ def test_derive_gear_sets_groups_by_family_and_set_number():
         ]
     )
 
-    assert sets["FANT_KNGT_01"]["parts"] == {
+    # Both parts are upper-body, so they share one region set.
+    assert sets["FANT_KNGT_01_upper"]["parts"] == {
         "Torso": "SK_FANT_KNGT_01_10TORS_HU01",
         "ArmUpperLeft": "SK_FANT_KNGT_01_11AUPL_HU01",
     }
-    assert sets["FANT_KNGT_01"]["group"] == "unknown"
-    assert "FANT_KNGT_02" in sets
+    assert sets["FANT_KNGT_01_upper"]["group"] == "upper"
+    assert "FANT_KNGT_02_upper" in sets
 
 
 def test_derive_gear_sets_ignores_unparseable_names():
@@ -178,7 +179,7 @@ def test_part_names_with_an_extra_prefix_and_no_species_still_parse():
     assert slot_for_part_name("SK_FUTR_APOC_OUTL_06_28AHPR") == "AttachmentHipsRight"
 
     sets = derive_gear_sets_from_names(["SK_SPEC_HUMN_BASE_01_10TORS"])
-    assert sets["SPEC_HUMN_BASE_01"]["parts"] == {
+    assert sets["SPEC_HUMN_BASE_01_upper"]["parts"] == {
         "Torso": "SK_SPEC_HUMN_BASE_01_10TORS"
     }
 
@@ -201,3 +202,91 @@ def test_a_null_part_name_leaves_the_slot_empty(tmp_path):
 
     assert "AttachmentHead" not in presets["600"]["parts"]
     assert "None" not in presets["600"]["parts"].values()
+
+
+class TestSlotRegions:
+    """The three regions a complete character is assembled from.
+
+    Which region a slot belongs to is a property of the slot itself, not of any
+    character, so it does not need Synty's tool database - which is the whole
+    point: without this, a user converting straight from .unitypackage files
+    gets gear sets the viewer cannot sort, and three empty pickers.
+    """
+
+    def test_every_slot_belongs_to_exactly_one_region(self):
+        from sidekick import SIDEKICK_SLOT_CODES, SLOT_GROUPS
+
+        slots = set(SIDEKICK_SLOT_CODES.values())
+        assert set(SLOT_GROUPS) == slots, "every slot needs a region, and only slots"
+        assert set(SLOT_GROUPS.values()) == {"head", "upper", "lower"}
+
+    def test_the_partition_matches_the_database(self):
+        """Measured on the real database: 14 head, 13 upper, 11 lower, no slot
+        in two regions."""
+        from collections import Counter
+        from sidekick import SLOT_GROUPS
+
+        counts = Counter(SLOT_GROUPS.values())
+        assert counts == {"head": 14, "upper": 13, "lower": 11}
+
+    def test_representative_slots_land_where_synty_puts_them(self):
+        from sidekick import SLOT_GROUPS
+
+        assert SLOT_GROUPS["Head"] == "head"
+        assert SLOT_GROUPS["AttachmentFace"] == "head"
+        assert SLOT_GROUPS["Torso"] == "upper"
+        assert SLOT_GROUPS["Wrap"] == "upper"
+        assert SLOT_GROUPS["AttachmentBack"] == "upper"
+        assert SLOT_GROUPS["Hips"] == "lower"
+        assert SLOT_GROUPS["AttachmentKneeLeft"] == "lower"
+
+
+class TestNameDerivedSetsAreGrouped:
+    """A name-derived set spans a whole character, which the viewer cannot sort
+    into its head/upper/lower pickers. Splitting by region makes the wardrobe
+    work without the database."""
+
+    @staticmethod
+    def _names(*codes):
+        return ["SK_HUMN_BASE_01_%s_HU01" % code for code in codes]
+
+    def test_a_whole_character_splits_into_three_sets(self):
+        from sidekick import derive_gear_sets_from_names
+
+        sets = derive_gear_sets_from_names(
+            self._names("01HEAD", "02HAIR", "10TORS", "15HNDL", "17HIPS", "20FOTL")
+        )
+        by_group = {entry["group"]: entry for entry in sets.values()}
+        assert set(by_group) == {"head", "upper", "lower"}
+        assert set(by_group["head"]["parts"]) == {"Head", "Hair"}
+        assert set(by_group["upper"]["parts"]) == {"Torso", "HandLeft"}
+        assert set(by_group["lower"]["parts"]) == {"Hips", "FootLeft"}
+
+    def test_each_set_id_is_distinct_so_none_overwrites_another(self):
+        from sidekick import derive_gear_sets_from_names
+
+        sets = derive_gear_sets_from_names(self._names("01HEAD", "10TORS", "17HIPS"))
+        assert len(sets) == 3
+
+    def test_a_head_only_family_yields_one_set(self):
+        from sidekick import derive_gear_sets_from_names
+
+        sets = derive_gear_sets_from_names(self._names("01HEAD", "02HAIR"))
+        assert len(sets) == 1
+        assert next(iter(sets.values()))["group"] == "head"
+
+    def test_two_families_stay_apart(self):
+        from sidekick import derive_gear_sets_from_names
+
+        sets = derive_gear_sets_from_names(
+            ["SK_HUMN_BASE_01_10TORS_HU01", "SK_FANT_KNGT_03_10TORS_HU01"]
+        )
+        assert len(sets) == 2
+        assert all(entry["group"] == "upper" for entry in sets.values())
+
+    def test_the_set_name_says_which_region_it_is(self):
+        from sidekick import derive_gear_sets_from_names
+
+        sets = derive_gear_sets_from_names(self._names("10TORS"))
+        name = next(iter(sets.values()))["name"]
+        assert "HUMN_BASE_01" in name and "upper" in name

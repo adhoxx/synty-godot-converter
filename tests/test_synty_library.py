@@ -15,6 +15,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import converter as converter_module  # noqa: E402
+from sidekick import find_sidekick_database  # noqa: E402
 from converter import extract_pack_name_from_package  # noqa: E402
 from synty_library import (  # noqa: E402
     SKIP_PREFIXES,
@@ -540,3 +541,100 @@ class TestLibraryEntryPoint:
         # The file still gets everything.
         assert "a debug line" in log.read_text(encoding="utf8")
         assert pane.level == logging.INFO, "the pane's level was not restored"
+
+
+class TestSidekickDatabaseDiscovery:
+    """Synty's tool database does not live in a pack's own folder.
+
+    It installs as Assets/Synty/SidekickCharacters/Database/Side_Kick_Data.db,
+    which matches no pack name - so the per-pack Unity lookup never finds it,
+    and a user who owns the Sidekick tool still got the degraded conversion.
+    """
+
+    def test_the_database_is_found_under_the_unity_assets_root(self, tmp_path):
+        assets = tmp_path / "Synty"
+        database = assets / "SidekickCharacters" / "Database" / "Side_Kick_Data.db"
+        database.parent.mkdir(parents=True)
+        database.write_bytes(b"SQLite format 3\x00")
+        assert find_sidekick_database([assets]) == database
+
+    def test_the_per_pack_lookup_does_not_find_it(self, tmp_path):
+        """Why this needed fixing: the pack folder and the tool folder are
+        siblings, and only the pack folder was ever searched."""
+        assets = tmp_path / "Synty"
+        (assets / "SidekickCharacters" / "Database").mkdir(parents=True)
+        (assets / "SidekickCharacters" / "Database" / "Side_Kick_Data.db").touch()
+        pack = assets / "SidekickStarter" / "Models"
+        pack.mkdir(parents=True)
+        (pack / "a.fbx").touch()
+        (pack / "b.fbx").touch()
+
+        found = find_unity_source("SIDEKICK_Starter", assets)
+        assert found == assets / "SidekickStarter"
+        assert find_sidekick_database([found]) is None
+
+    def test_the_config_carries_the_database_to_the_converter(
+        self, tmp_path, monkeypatch
+    ):
+        assets = tmp_path / "Synty"
+        database = assets / "SidekickCharacters" / "Database" / "Side_Kick_Data.db"
+        database.parent.mkdir(parents=True)
+        database.touch()
+
+        seen = {}
+
+        def capture(config):
+            seen["config"] = config
+            return converter_module.ConversionStats()
+
+        monkeypatch.setattr("synty_library.run_conversion", capture)
+        args = argparse.Namespace(
+            output=tmp_path / "out", godot=tmp_path / "godot.exe",
+            godot_timeout=60, retarget=True, unity_assets=assets,
+        )
+        convert_mesh_pack(
+            tmp_path / "SIDEKICK_Starter.unitypackage", "SIDEKICK_Starter",
+            tmp_path / "src", args, tmp_path / "P.log",
+        )
+        assert seen["config"].sidekick_database == database
+
+    def test_no_unity_assets_means_no_database_and_no_error(self, tmp_path, monkeypatch):
+        seen = {}
+
+        def capture(config):
+            seen["config"] = config
+            return converter_module.ConversionStats()
+
+        monkeypatch.setattr("synty_library.run_conversion", capture)
+        args = argparse.Namespace(
+            output=tmp_path / "out", godot=tmp_path / "godot.exe",
+            godot_timeout=60, retarget=True, unity_assets=None,
+        )
+        convert_mesh_pack(
+            tmp_path / "P.unitypackage", "P", tmp_path / "src", args,
+            tmp_path / "P.log",
+        )
+        assert seen["config"].sidekick_database is None
+
+    def test_the_master_palette_is_found_beside_the_database(self, tmp_path):
+        """Both live in the tool folder, and neither in any pack's folder.
+
+        Finding the database but not the palette leaves recolouring disabled
+        for a user who has everything needed for it.
+        """
+        from sidekick import find_master_color_map
+
+        tool = tmp_path / "Synty" / "SidekickCharacters"
+        database = tool / "Database" / "Side_Kick_Data.db"
+        database.parent.mkdir(parents=True)
+        database.touch()
+        palette = tool / "Resources" / "Textures" / "T_ColorMap.png"
+        palette.parent.mkdir(parents=True)
+        palette.touch()
+        # The decoy under _Demos is a different texture with the same name.
+        decoy = tool / "_Demos" / "Textures" / "T_ColorMap.png"
+        decoy.parent.mkdir(parents=True)
+        decoy.touch()
+
+        # The tool root is the database's grandparent: Database/<db>.
+        assert find_master_color_map([database.parent.parent]) == palette

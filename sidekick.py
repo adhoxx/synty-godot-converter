@@ -549,6 +549,61 @@ SIDEKICK_SLOT_CODES = {
 # a naked body - the armoured torso replaces the bare one outright.
 _PART_GROUP_NAMES = {1: "head", 2: "upper", 3: "lower"}
 
+# The same partition, keyed by slot rather than by the database's integer.
+#
+# Which region a slot belongs to is a property of the slot, not of any
+# character, so it can be stated here once and used by packs converted straight
+# from a .unitypackage - which ship no database. Without it those packs' gear
+# sets carry no region, and a viewer sorting a wardrobe into head/upper/lower
+# finds nothing to put in any of them.
+#
+# Read off the real database and checked: all 76 slot tokens it uses (each slot
+# appears as both its code and its name) agree on a region, none spans two, and
+# the 38 slots divide 14 / 13 / 11.
+SLOT_GROUPS = {
+    # head - the face and everything worn on it
+    "Head": "head",
+    "Hair": "head",
+    "FacialHair": "head",
+    "EyebrowLeft": "head",
+    "EyebrowRight": "head",
+    "EyeLeft": "head",
+    "EyeRight": "head",
+    "EarLeft": "head",
+    "EarRight": "head",
+    "Nose": "head",
+    "Teeth": "head",
+    "Tongue": "head",
+    "AttachmentHead": "head",
+    "AttachmentFace": "head",
+    # upper - the whole upper body, armoured or bare
+    "Torso": "upper",
+    "ArmUpperLeft": "upper",
+    "ArmUpperRight": "upper",
+    "ArmLowerLeft": "upper",
+    "ArmLowerRight": "upper",
+    "HandLeft": "upper",
+    "HandRight": "upper",
+    "AttachmentBack": "upper",
+    "AttachmentShoulderLeft": "upper",
+    "AttachmentShoulderRight": "upper",
+    "AttachmentElbowLeft": "upper",
+    "AttachmentElbowRight": "upper",
+    "Wrap": "upper",
+    # lower - hips down
+    "Hips": "lower",
+    "LegLeft": "lower",
+    "LegRight": "lower",
+    "FootLeft": "lower",
+    "FootRight": "lower",
+    "AttachmentHipsFront": "lower",
+    "AttachmentHipsBack": "lower",
+    "AttachmentHipsLeft": "lower",
+    "AttachmentHipsRight": "lower",
+    "AttachmentKneeLeft": "lower",
+    "AttachmentKneeRight": "lower",
+}
+
 # sk_part_preset_row.part_type is inconsistent: some rows hold the slot code
 # ("10TORS"), others the slot name outright ("Head"). Reading only codes drops
 # 352 of the 532 presets and every face slot of the rest, silently. Measured on
@@ -687,25 +742,41 @@ def derive_gear_sets_from_names(part_names: list[str]) -> dict[str, dict]:
     """Group parts into sets by the family and number in their names.
 
     The fallback for packs converted straight from a .unitypackage, which ships
-    no tool database. Coarser than the database's presets - SK_FANT_KNGT_01
-    bundles body, outfit and attachments that the database keeps apart - but it
-    needs nothing beyond the part names themselves.
+    no tool database. Coarser than the database's presets - it cannot tell that
+    two families share a bare torso - but it needs nothing beyond the part names
+    themselves.
+
+    Each family and number is split across the three body regions, because a
+    complete character is one set from each and a set spanning all three is not
+    something a wardrobe can offer. The parts are the same either way; the split
+    is what lets them be mixed.
 
     Args:
         part_names: Part names, e.g. from a parts index.
 
     Returns:
-        Set id to the same shape load_part_presets returns, with group
-        "unknown" and species 0.
+        Set id to the same shape load_part_presets returns, with species 0.
+        A slot with no known region is left out rather than pooled into a
+        fourth group nothing would look in.
     """
     sets: dict[str, dict] = {}
     for part_name in part_names:
         parsed = parse_part_name(part_name)
         if parsed is None:
             continue
-        set_id = f"{parsed['family']}_{parsed['set']}"
+        group = SLOT_GROUPS.get(parsed["slot"])
+        if group is None:
+            continue
+        family_set = f"{parsed['family']}_{parsed['set']}"
+        set_id = f"{family_set}_{group}"
         entry = sets.setdefault(
-            set_id, {"name": set_id, "group": "unknown", "species": 0, "parts": {}}
+            set_id,
+            {
+                "name": f"{family_set} ({group})",
+                "group": group,
+                "species": 0,
+                "parts": {},
+            },
         )
         entry["parts"][parsed["slot"]] = part_name
     return sets

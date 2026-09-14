@@ -434,6 +434,7 @@ class ConversionConfig:
     flatten_output: bool = True
     pack_type: str = "auto"
     animations: str | None = None
+    sidekick_database: Path | None = None
 
 
 @dataclass
@@ -3034,7 +3035,13 @@ def run_conversion(config: ConversionConfig) -> ConversionStats:
                             # corrections in its tool database, which ships in
                             # the user's Unity project rather than the package -
                             # so this is available only via --source-files.
-                            sk_database = find_sidekick_database([config.source_files])
+                            # A caller that already knows where the database
+                            # is says so: it installs as SidekickCharacters/,
+                            # which matches no pack name, so a per-pack search
+                            # of source_files can never turn it up.
+                            sk_database = config.sidekick_database or (
+                                find_sidekick_database([config.source_files])
+                            )
                             if sk_database:
                                 sk_adjustments = load_rig_adjustments(sk_database)
                                 if sk_adjustments:
@@ -3084,7 +3091,19 @@ def run_conversion(config: ConversionConfig) -> ConversionStats:
                                 # so any mix of parts renders against it without
                                 # a red texel. Per-character palettes are
                                 # recolours of it.
-                                sk_master = find_master_color_map([config.source_files])
+                                # The palette sits in the same tool folder as
+                                # the database - Resources/Textures beside
+                                # Database - and in no pack's folder, so a
+                                # located database says where to look. Without
+                                # this, a user with the tool gets its gear sets
+                                # and colour tables but no palette to paint
+                                # with, and recolouring stays disabled.
+                                palette_dirs = [config.source_files]
+                                if config.sidekick_database is not None:
+                                    palette_dirs.insert(
+                                        0, config.sidekick_database.parent.parent
+                                    )
+                                sk_master = find_master_color_map(palette_dirs)
                                 if sk_master:
                                     parts_dir = output_root / SIDEKICK_PARTS_DIRNAME
                                     parts_dir.mkdir(parents=True, exist_ok=True)

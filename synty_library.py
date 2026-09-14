@@ -48,6 +48,7 @@ from converter import (  # noqa: E402
     extract_pack_name_from_package,
     run_conversion,
 )
+from sidekick import find_sidekick_database  # noqa: E402
 from unity_package import (  # noqa: E402
     count_assets_by_suffix,
     extract_assets_to_directory,
@@ -228,12 +229,21 @@ def convert_mesh_pack(
     warning report reads its numbers back out of these logs - the count of
     declared character definitions is printed nowhere else.
     """
+    # Synty's tool database installs as SidekickCharacters/, which matches no
+    # pack name - so the per-pack Unity lookup never finds it, and a user who
+    # owns the Sidekick tool still got gear sets, colours and joint offsets
+    # missing. Search the whole --unity-assets root instead.
+    database = None
+    if getattr(args, "unity_assets", None):
+        database = find_sidekick_database([args.unity_assets])
+
     config = ConversionConfig(
         unity_package=package,
         source_files=source,
         output_dir=args.output,
         godot_exe=args.godot,
         godot_timeout=args.godot_timeout,
+        sidekick_database=database,
         # Binding a library to a character is the whole point of ordering
         # animation packs first, and retargeting is what makes it hold.
         animations="all",
@@ -335,8 +345,10 @@ def collect_warnings(output: Path, results: list[dict]) -> list[str]:
             "one's would), recolouring is unavailable because the colour tables "
             "come from the database - and since Synty's base body parts carry "
             "no colour of their own, a bare body renders plain white - and gear "
-            "sets fall back to what part names imply: whole characters rather "
-            "than mix-and-match regions, tens of sets rather than hundreds. The "
+            "sets fall back to what part names imply, which is tens of sets "
+            "rather than hundreds, and cannot tell that two families share a "
+            "bare torso. Characters still assemble, animate and mix by region. "
+            "The "
             "database ships with Synty's Sidekick Unity tool, never inside a "
             ".unitypackage; pass its folder as --unity-assets to pick it up."
         )

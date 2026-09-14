@@ -61,8 +61,11 @@ produced; see that folder's README to drive it from game code.
 
 The run ends by naming what it could not do: a missing `Side_Kick_Data.db` (which
 ships with Synty's Sidekick Unity tool, never inside a `.unitypackage`, and
-without which attachment joints do not follow body size), and any pack that
-declared characters and built none.
+without which attachment joints do not follow body size and recolouring is
+unavailable), and any pack that declared characters and built none. Characters
+still assemble, animate and mix by body region without it - point
+`--unity-assets` at a Unity project with the Sidekick tool installed to pick the
+database up.
 
 ## Quick Start
 
@@ -392,8 +395,8 @@ Proportions also move the 11 attachment joints - `backAttach`, `hipAttach_*`,
 and back items keep up with the body instead of floating off a heavy character
 or sinking into a skinny one. The per-joint maxima come from Synty's
 `Side_Kick_Data.db`, which ships in a Unity project rather than in the
-`.unitypackage`, so this applies only when `--source-files` points at a project
-with the Sidekick tool installed. Without it the characters still convert; their
+`.unitypackage`, so this applies only when `--source-files` (or, for a whole
+library, `--unity-assets`) points at a project with the Sidekick tool installed. Without it the characters still convert; their
 gear just keeps the base rig's placement.
 
 Sidekick rigs need no retargeting: their bone names, order and rests already
@@ -535,9 +538,12 @@ attachments (65), so recolouring armour never disturbs skin. The master
 `T_ColorMap.png` defines all 209, which is what guarantees that an arbitrary mix
 of parts has no undefined - that is, bright red - colour slot.
 
-Without a Sidekick tool database under `--source-files`, the library still
-emits: gear sets fall back to the coarser family-and-number grouping in part
-names, and recolouring is unavailable.
+Without a Sidekick tool database, the library still emits gear sets: they are
+derived from the family and number in part names and split across the same three
+body regions, so the wardrobe mixes normally. They are coarser - tens of sets
+rather than the database's 532, and blind to two families sharing a bare torso -
+and recolouring is unavailable, because the colour tables and the master palette
+both come from the database.
 
 ### Re-running a converted pack
 
