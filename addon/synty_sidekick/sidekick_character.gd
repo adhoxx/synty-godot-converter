@@ -6,14 +6,12 @@ class_name SidekickCharacter extends Node3D
 ## breastplate IS the torso mesh, and one gear set spans up to 27 slots. So
 ## equipping means swapping meshes, which is what this node does.
 ##
-## Three orderings matter and are easy to get wrong:
-##   - skin is assigned AFTER add_child(), or the part stays in bind pose while
-##     the skeleton animates;
-##   - a part's missing bones are grafted BEFORE its mesh is added, or its skin
-##     binds resolve to nothing and the geometry renders detached;
-##   - the outgoing node is remove_child()'d, not merely queue_free()'d, because
-##     the deferred free would still hold the node name when the replacement is
-##     added and Godot would rename the newcomer.
+## Three orderings matter and fail quietly if changed:
+##   - skin is assigned AFTER add_child(), or the part stays in bind pose;
+##   - missing bones are grafted BEFORE the mesh is added, or its skin binds
+##     resolve to nothing and the geometry renders detached;
+##   - the outgoing node is remove_child()'d, not just queue_free()'d, or the
+##     deferred free still holds the name and Godot renames the replacement.
 
 const PARTS_DIRNAME := "sidekick_parts"
 const MASTER_COLOR_MAP := "T_SidekickMaster_ColorMap.png"
@@ -41,22 +39,18 @@ var base_loadout: Dictionary = {}   # slot -> part name to revert to
 
 ## Bone name -> blend type -> {offset, rotation}, from the tool database.
 ##
-## Applied to bone POSES, never to rests. A clip drives 8 of the 11 attachment
-## joints with position tracks and overwrites their pose every frame, so an
-## offset folded into the rest would simply be discarded the moment an animation
-## played - the gear would snap back to its neutral place mid-swing.
+## Applied to bone POSES, never to rests: a clip overwrites these joints every
+## frame, so an offset folded into the rest is discarded as soon as one plays.
 var rig_adjustments: Dictionary = {}
 
 var animation_player: AnimationPlayer = null
 
 ## Bone names the playing clip drives, per channel.
 ##
-## The offsets are added on top of the pose, so the base has to be whatever
-## supplies that channel this frame. A driven channel is re-supplied by the clip
-## every frame, so adding never accumulates; an undriven one is not, so its base
-## must be the bone's rest instead - otherwise each frame's offset compounds and
-## the joint leaves the scene. Measured: the hip joints carry rotation tracks
-## but no position tracks, and drifted 10 units in 60 frames before this.
+## Offsets are added on top of the pose, so the base must be whatever supplies
+## that channel this frame: the clip's value where it drives one, the bone's rest
+## where it does not. Get it wrong and an undriven channel compounds every frame
+## until the joint leaves the scene. Which channels a clip drives varies per clip.
 var _driven_positions: Dictionary = {}
 var _driven_rotations: Dictionary = {}
 
@@ -102,14 +96,10 @@ func set_base_skeleton(new_skeleton: Skeleton3D) -> void:
 
 ## Builds a skeleton carrying the core rig.
 ##
-## Part rigs vary wildly - from 1 bone to 117 - so neither the first part nor
-## the largest is a safe seed. The smallest are stub rigs most skins cannot bind
-## to; the largest is a SciFi shoulder pad whose 29 extra bones are all its own
-## cloth simulation, which no character should inherit.
-##
-## The core rig is the modal one: 689 of the 1028 parts carry exactly 88 bones.
-## A Torso is preferred among those, being a canonical body part rather than an
-## attachment that happens to match.
+## Part rigs run from 1 bone to 117, so neither the first nor the largest is a
+## safe seed - the largest is a shoulder pad carrying its own cloth simulation.
+## The core rig is the modal one, preferring a Torso among those as a canonical
+## body part rather than an attachment that happens to match.
 ##
 ## @returns A new Skeleton3D, or null when the library holds no parts.
 func create_base_skeleton() -> Skeleton3D:
@@ -220,8 +210,7 @@ func set_base_loadout() -> void:
 
 ## Reverts one slot to the base loadout, so removing armour exposes the body.
 ##
-## With no base loadout set there is nothing to fall back on, and the slot
-## empties instead.
+## With no base loadout set the slot simply empties.
 func clear_slot(slot: String) -> void:
 	if base_loadout.has(slot):
 		set_part(slot, String(base_loadout[slot]))
@@ -326,12 +315,10 @@ func _blend_weights() -> Dictionary:
 ## shapes reshape the body while the gear stays put, so a back banner or a hip
 ## pouch floats off a heavy character.
 ##
-## Offsets go onto the POSE, on top of whatever is already there, because a
-## playing clip rewrites these bones every frame and would discard anything
-## folded into the rest. The base differs by state and that is what keeps this
-## idempotent: while a clip plays it re-supplies the pose each frame, so adding
-## on top never accumulates; while stopped nothing re-supplies it, so the base
-## is the bone's own rest instead of its current pose.
+## Offsets go onto the POSE, since a playing clip rewrites these bones every
+## frame and would discard anything folded into the rest. What keeps it
+## idempotent is the base: the current pose while a clip re-supplies it each
+## frame, the bone's rest while stopped.
 func apply_joint_adjustments() -> void:
 	if rig_adjustments.is_empty() or skeleton == null:
 		return

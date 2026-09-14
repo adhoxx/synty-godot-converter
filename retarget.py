@@ -1,11 +1,9 @@
 """Retarget Synty rigs onto SkeletonProfileHumanoid at import time.
 
-A clip poses only the rig whose rest orientations it was authored against:
-almost every track is an absolute local rotation, not a delta from rest. Synty's
-character rigs and clip rigs disagree - measured on Dark Fantasy, the character's
-`Spine` rest runs along X at (0.1039, 0, 0) and the clip rig's along Y at
-(0.0005, 0.1039, 0.0030), orthogonal at identical magnitude - so binding one to
-the other collapses the character rather than merely mis-posing it.
+A clip poses only the rig whose rest orientations it was authored against, since
+almost every track is an absolute local rotation rather than a delta from rest.
+Synty's character rigs and clip rigs disagree, so binding one to the other
+collapses the character.
 
 Godot's scene importer can rewrite both onto a common profile, given a `BoneMap`.
 This module builds that map from a file's real bones and puts it where the
@@ -59,11 +57,9 @@ POLYGON_BONE_MAP: dict[str, str] = {
     "RightToes": "Ball_R",
 }
 
-# Profile bone -> (base rig name, side). Synty names both hands' finger bones
-# identically, so Godot's FBX importer dedups the second occurrence with a
-# suffix - and the suffix number differs per file: the right hand is `Thumb_01_2`
-# in the character FBX and `Thumb_01_1` in the clip FBX. Side is therefore
-# resolved by where the bone sits, never by which suffix it carries.
+# Profile bone -> (base rig name, side). Both hands' finger bones share names, so
+# Godot's importer dedups one side with a suffix whose number differs per file.
+# Side is therefore resolved by position, never by the suffix.
 POLYGON_DUPLICATE_BONES: dict[str, tuple[str, str]] = {
     "LeftThumbMetacarpal": ("Thumb_01", "L"),
     "LeftThumbProximal": ("Thumb_02", "L"),
@@ -88,10 +84,9 @@ POLYGON_DUPLICATE_BONES: dict[str, tuple[str, str]] = {
 # The hands a finger chain is matched against.
 _HANDS = {"L": "Hand_L", "R": "Hand_R"}
 
-# The bone at the base of each finger chain - the knuckle, nearest the wrist.
-# Side is decided from these and applied to the whole chain, because a fingertip
-# is not reliably nearest its own hand: Sword Combat's poses put both hands on
-# one hilt, and 18 of its clips have a left fingertip closer to the right hand.
+# The knuckle at the base of each finger chain. Side is decided from these and
+# applied to the whole chain: a fingertip is not reliably nearest its own hand,
+# since a two-handed grip puts both hands together.
 _CHAIN_ROOTS = ("Thumb_01", "IndexFinger_01", "Finger_01")
 
 Vector = tuple[float, float, float]
@@ -114,11 +109,9 @@ def _suffix_candidates(bones: dict[str, Vector], base: str) -> list[str]:
 def _hand_suffixes(bones: dict[str, Vector]) -> dict[str, str]:
     """Decides which dedup suffix belongs to which hand.
 
-    Godot dedups duplicate bone names with an index that differs per file - the
-    right hand is `Thumb_01_2` in a character FBX and `Thumb_01_1` in a clip FBX
-    - so the suffix has to be learned rather than assumed. Each chain root votes
-    by proximity to its hand, and the majority wins; a single contorted chain
-    cannot then mislabel a hand.
+    The suffix differs per file, so it is learned rather than assumed: each chain
+    root votes by proximity to its hand and the majority wins, so one contorted
+    chain cannot mislabel a hand.
 
     Returns:
         {"L": suffix, "R": suffix}, empty when the two sides cannot be told
@@ -154,19 +147,14 @@ def resolve_bone_map(bones: dict[str, Vector]) -> tuple[dict[str, str], list[str
         bones: Bone name -> global rest origin, as reported by the Godot side.
 
     Returns:
-        (profile bone -> rig bone name, *required* profile bones that could not be
-        resolved). A non-empty second element means the rig is not a humanoid and
-        must not be retargeted.
+        (profile bone -> rig bone name, *required* profile bones that could not
+        be resolved). A non-empty second element means the rig is not a humanoid
+        and must not be retargeted.
 
-        Only structural bones are required. A finger the rig lacks is left
-        unmapped, which Godot handles by keeping the bone under its own name -
-        two of Sword Combat's clips have no left index finger and are otherwise
-        ordinary humanoids. This decides eligibility, not correctness: whether a
-        retargeted pair can actually pose each other is settled afterwards by
-        rest agreement and by looking at a rendered frame.
-
-        A profile bone the template leaves empty is neither resolved nor
-        reported: it is deliberately unmapped, not missing.
+        Only structural bones are required; a missing finger is left unmapped and
+        Godot keeps it under its own name. This decides eligibility, not
+        correctness - whether a retargeted pair can pose each other is settled
+        afterwards by rest agreement.
     """
     resolved: dict[str, str] = {}
     unresolved: list[str] = []
@@ -229,10 +217,9 @@ def render_subresources(bone_map_res: str) -> str:
         '"PATH:Skeleton3D": {\n'
         '"retarget/bone_map": Resource("%s"),\n'
         '"retarget/bone_renamer/rename_bones": true,\n'
-        # True rewrites clip tracks to %GeneralSkeleton:<bone>, a scene-unique
-        # path. Our characters name their skeleton Skeleton3D, and Godot skips
-        # unresolvable tracks without complaint - so the wrong value here yields
-        # a character that binds, reports success, and never moves.
+        # True rewrites tracks to %GeneralSkeleton:<bone>, which our
+        # Skeleton3D-named characters never resolve - and Godot skips
+        # unresolvable tracks silently, so the character binds and never moves.
         '"retarget/bone_renamer/unique_node/make_unique": false,\n'
         '"retarget/rest_fixer/apply_node_transforms": true,\n'
         '"retarget/rest_fixer/fix_silhouette/enable": true,\n'

@@ -1,10 +1,8 @@
 """Extract the FBX out of a .unitypackage, so a pack converts without Unity.
 
-The converter reads meshes from --source-files, not from the .unitypackage, so
-a pack that was never imported into Unity has nothing to point it at. Its FBX
-are in the package all the same: a .unitypackage is a gzipped tar of GUID-named
-folders, each holding the raw asset bytes beside the project path it belongs
-at. Writing those out is all Unity's import does for a mesh.
+The converter reads meshes from --source-files, so a pack never imported into
+Unity has nothing to point it at. Its FBX are in the package all the same, and
+writing them out is all Unity's import does for a mesh.
 
 Usage:
     python tools/extract_fbx.py <package.unitypackage> <output_dir>

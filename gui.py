@@ -342,9 +342,8 @@ class SyntyConverterApp:
         )
         godot_browse.grid(row=row, column=2, pady=4)
 
-        # Packages folder - the whole-library mode's only extra input. The
-        # output directory, Godot executable and timeout above are shared with
-        # the single-pack conversion.
+        # The library mode's only extra input; it shares the output directory,
+        # Godot executable and timeout above.
         row += 1
         packages_label = ctk.CTkLabel(
             paths_frame, text="Packages Folder:", anchor="w", width=120
@@ -1125,9 +1124,8 @@ class SyntyConverterApp:
             godot=Path(godot),
             unity_assets=None,
             work_dir=None,
-            # Retargeting is what makes clips bind to Polygon characters, and a
-            # library being built for the first time has no bone names to
-            # protect - so it is on here, as it is on the command line.
+            # On here as on the command line: a library built for the first
+            # time has no existing bone names to protect.
             retarget=True,
             godot_timeout=self.timeout_var.get(),
             force=False,
@@ -1157,12 +1155,10 @@ class SyntyConverterApp:
     def _run_library_thread(self, args: argparse.Namespace):
         """Run the library conversion in a background thread."""
         try:
-            # convert_library reports line by line rather than returning a
-            # transcript, so its commentary reaches the log pane as it happens.
-            # It goes through the same queue the logging handler uses, drained
-            # on the main thread: tkinter widgets belong to that thread, and
-            # calling root.after() per line from here raises "main thread is
-            # not in main loop" and kills the conversion silently.
+            # Progress goes through the same queue the logging handler uses,
+            # drained on the main thread. tkinter widgets belong to that thread;
+            # calling root.after() per line from here raises "main thread is not
+            # in main loop" and kills the conversion silently.
             def report(line: str) -> None:
                 for part in str(line).split("\n"):
                     if part.strip():

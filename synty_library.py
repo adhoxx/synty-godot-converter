@@ -57,9 +57,7 @@ from unity_package import (  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent
 
-# Packages that are not Synty asset packs at all. SIDEKICK_ deliberately is not
-# here: those packs carry the modular character parts, and converting them is
-# what produces the parts library the addon consumes.
+# Packages that are not Synty asset packs at all.
 SKIP_PREFIXES = ("ParrelSync",)
 
 # The Sidekick runtime, copied into every project that converts a SIDEKICK pack.
@@ -69,13 +67,11 @@ ADDON_SOURCE = REPO_ROOT / "addon" / "synty_sidekick"
 def install_addon(output: Path, report=print) -> int:
     """Copies the Sidekick addon into the converted project.
 
-    Refreshed on every run so a user picks up fixes. Their own edits inside
-    addons/synty_sidekick/ are therefore overwritten, which the addon's README
-    says plainly.
+    Refreshed on every run, so a user's own edits inside the emitted
+    addons/synty_sidekick/ are overwritten - the addon's README says so.
 
     Returns:
-        Number of files copied. Zero means the addon source was missing, which
-        is reported rather than passed over.
+        Files copied. Zero means the addon source was missing, and is reported.
     """
     if not ADDON_SOURCE.is_dir():
         report(f"WARNING: Sidekick addon source not found at {ADDON_SOURCE}")
@@ -102,22 +98,17 @@ def normalise(name: str) -> str:
     return "".join(c for c in name.lower() if c.isalnum())
 
 
-# A Unity folder holding fewer meshes than this is a partial import, and the
-# .unitypackage is the better source. One pack measured here was imported with
-# exactly one FBX out of 576, which silently produced a pack with no characters.
+# Below this a Unity folder is a partial import - full directory structure,
+# almost no meshes - and the .unitypackage is the better source.
 MIN_UNITY_SOURCE_FBX = 2
 
 
 def find_unity_source(pack_name: str, unity_assets: Path | None) -> Path | None:
     """Locates a pack's already-imported Unity folder, if it has a usable one.
 
-    A Unity project is an accelerator, not a requirement: without one every pack
-    takes the extraction route, which reads FBX straight out of the
-    .unitypackage - all Unity's import does for a mesh.
-
-    A folder that exists is not enough either: a partially-imported pack has the
-    directory structure and almost none of the meshes, and preferring it over
-    the .unitypackage loses everything it is missing without saying so.
+    A Unity project is an accelerator, not a requirement; without one a pack is
+    read from its .unitypackage. A folder must hold real meshes to be preferred,
+    since a partial import silently loses whatever it is missing.
     """
     if unity_assets is None or not unity_assets.is_dir():
         return None
@@ -134,9 +125,8 @@ def find_unity_source(pack_name: str, unity_assets: Path | None) -> Path | None:
     return None
 
 
-# A pack's PNGs are its sprite set rather than its mesh textures once they
-# outnumber its meshes by this much. Dark Fantasy HUD is 2205 sprites to 6
-# demo-scene FBX; a prop pack runs the other way, 520 meshes to 300 textures.
+# A pack's PNGs are a sprite set rather than mesh textures once they outnumber
+# its meshes by this much: a UI pack ships thousands of sprites and a few FBX.
 SPRITE_DOMINANCE = 10
 
 
@@ -148,30 +138,23 @@ def has_meshes(counts: dict[str, int]) -> bool:
 def has_sprites(counts: dict[str, int]) -> bool:
     """True when a pack's images are a UI sprite set, not mesh textures.
 
-    The two routes are not exclusive: a UI pack usually ships a few demo-scene
-    meshes as well, and routing on "no FBX at all" dropped every sprite in
-    Dark Fantasy HUD because of six of them.
+    The routes are not exclusive - a UI pack also ships a few demo-scene meshes -
+    so this is about dominance, not the absence of FBX.
     """
     pngs = counts.get(".png", 0)
     return pngs > 0 and pngs > counts.get(".fbx", 0) * SPRITE_DOMINANCE
 
 
 def is_animation_pack(counts: dict[str, int]) -> bool:
-    """True for a pack that is mostly animation clips rather than assets.
-
-    Mirrors the converter's own detection so the run can be ordered without
-    unpacking each package twice.
-    """
+    """True for a pack that is mostly animation clips rather than assets."""
     return counts.get(".anim", 0) > 0 and counts.get(".fbx", 0) > 0
 
 
 def resolve_work_dir(output: Path, work_dir: Path | None) -> Path:
     """Decides where FBX extracted from packages are staged.
 
-    Godot imports everything beneath its project root, so this must not sit
-    inside the output: a work directory one level down doubles every imported
-    mesh. Defaulting beside the project keeps the two together without putting
-    one inside the other.
+    Godot imports everything beneath its project root, so this must sit outside
+    the output or every mesh is imported twice.
 
     Raises:
         ValueError: The chosen directory is the project, or lies within it.
@@ -189,15 +172,12 @@ def resolve_work_dir(output: Path, work_dir: Path | None) -> Path:
 
 
 def convert_ui_pack(package: Path, pack_name: str, output: Path) -> tuple[bool, str]:
-    """Writes a UI pack's sprites into the Godot project.
+    """Writes a UI pack's sprites where Godot imports them as textures unaided.
 
-    There is nothing to convert - Godot imports a PNG as a Texture2D on its
-    own - so the work is placing the files where the project can see them,
-    keeping Synty's folder structure so sprite sets stay together.
+    Synty's folder structure is kept so sprite sets stay together.
     """
     destination = output / pack_name / "ui"
     try:
-        # Project paths start "Assets/Synty/<Pack>/", which says nothing here.
         written = extract_assets_to_directory(
             package, destination, {".png"}, strip_prefix="Assets/Synty/"
         )
@@ -217,22 +197,12 @@ def convert_mesh_pack(
 ) -> tuple[bool, str]:
     """Converts one pack in this process, logging it to a per-pack file.
 
-    This used to shell out to `sys.executable converter.py`, which cannot
-    survive being frozen: a PyInstaller build has no interpreter to re-launch
-    and no converter.py to hand it, so the exe would re-run itself with
-    arguments it does not understand. In-process works both frozen and from
-    source.
-
-    What the subprocess gave for free is kept deliberately. A crash is caught
-    here, so it fails one pack rather than the run. And the per-pack log is a
-    DEBUG FileHandler rather than a redirected stdout, because the run's
-    warning report reads its numbers back out of these logs - the count of
-    declared character definitions is printed nowhere else.
+    In-process rather than a subprocess so a PyInstaller build works, which has
+    no interpreter to re-launch. A crash therefore fails one pack rather than
+    the run, and the log is complete enough for _read_pack_counts to read back.
     """
-    # Synty's tool database installs as SidekickCharacters/, which matches no
-    # pack name - so the per-pack Unity lookup never finds it, and a user who
-    # owns the Sidekick tool still got gear sets, colours and joint offsets
-    # missing. Search the whole --unity-assets root instead.
+    # The tool database installs as SidekickCharacters/, matching no pack name,
+    # so only a search of the whole --unity-assets root finds it.
     database = None
     if getattr(args, "unity_assets", None):
         database = find_sidekick_database([args.unity_assets])
@@ -244,29 +214,21 @@ def convert_mesh_pack(
         godot_exe=args.godot,
         godot_timeout=args.godot_timeout,
         sidekick_database=database,
-        # Binding a library to a character is the whole point of ordering
-        # animation packs first, and retargeting is what makes it hold.
         animations="all",
         retarget=args.retarget,
         verbose=True,
     )
 
-    # One file, written by two writers. The converter logs most of its progress
-    # but prints its banner and summary straight to stdout, which the subprocess
-    # used to swallow into the same redirect; without capturing it here, that
-    # text lands in the middle of this run's own summary.
+    # The converter prints its banner and summary outside logging, so stdout is
+    # redirected into the same file rather than into this run's own summary.
     log_file = log_path.open("w", encoding="utf8", errors="replace")
     handler = logging.StreamHandler(log_file)
     handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
     handler.setLevel(logging.DEBUG)
-    # The GUI hangs its own log pane off the root logger and shares this
-    # process, so both the level and the handler go back as they were found.
+    # DEBUG is needed for a complete log file, but the GUI's log pane hangs off
+    # the same root logger: hold other handlers at INFO, and restore everything.
     root = logging.getLogger()
     previous_level = root.level
-    # The level has to come down to DEBUG for the log file to be complete, but
-    # that would otherwise pour every debug line into whatever else is
-    # listening - the GUI's log pane, which has its own idea of how verbose the
-    # user asked for. Hold the other handlers where they are for the duration.
     muted = [(h, h.level) for h in root.handlers if h.level < logging.INFO]
     for other, _ in muted:
         other.setLevel(logging.INFO)
@@ -297,10 +259,9 @@ def convert_mesh_pack(
 def _read_pack_counts(log_path: Path) -> dict:
     """Pulls the two numbers the warning report needs out of a pack's log.
 
-    characters_saved comes from GODOT_SUMMARY. The count of declared definitions
-    is only ever printed as prose, so it is matched from that line - the pair is
-    what distinguishes "this pack has no characters" from "this pack's characters
-    did not build".
+    characters_saved comes from GODOT_SUMMARY; the count of declared definitions
+    is only printed as prose. The pair distinguishes "no characters here" from
+    "the characters failed to build".
     """
     counts = {"characters": 0, "definitions": 0}
     try:
@@ -322,8 +283,8 @@ def _read_pack_counts(log_path: Path) -> dict:
 def collect_warnings(output: Path, results: list[dict]) -> list[str]:
     """Names the degradations a user would otherwise discover by accident.
 
-    A run that reports only counts looks like success even when a pack built no
-    characters, which is exactly how this repo shipped ten such packs.
+    A run reporting only counts reads as success even when a pack built no
+    characters.
     """
     notes: list[str] = []
 
@@ -331,8 +292,8 @@ def collect_warnings(output: Path, results: list[dict]) -> list[str]:
         r.get("pack", "").startswith("SIDEKICK_") and r.get("status") in ("ok", "partial")
         for r in results
     )
-    # Both files are derived from Side_Kick_Data.db and from nothing else, so
-    # either one present means the database was found.
+    # Both files come from Side_Kick_Data.db and nothing else, so either one
+    # present means the database was found.
     found_database = (
         (output / "sidekick_rig_adjustments.json").exists()
         or (output / "sidekick_colors.json").exists()
@@ -433,8 +394,7 @@ def _status(sprites_ok: bool | None, meshes_ok: bool | None) -> str:
 def convert_library(args: argparse.Namespace, report=print) -> int:
     """Converts every package in a folder into one Godot project.
 
-    Shared by the CLI and the GUI, which differ only in where the running
-    commentary goes.
+    Shared by the CLI and the GUI, which differ only in where progress goes.
 
     Args:
         args: Parsed arguments, or any namespace carrying the same fields.
@@ -504,9 +464,8 @@ def convert_library(args: argparse.Namespace, report=print) -> int:
         )
 
     # A library with no Sidekick packs has no parts index for the addon to read.
+    # "skipped" counts, so a resume run still refreshes the addon.
     if any(
-        # "skipped" counts: a resume run converts nothing and must still
-        # refresh the addon, or a user never picks up a fix to it.
         r["package"].startswith("SIDEKICK_")
         and r["status"] in ("ok", "partial", "skipped")
         for r in results

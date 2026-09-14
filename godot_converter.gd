@@ -137,9 +137,8 @@ var config_animation_libraries: Array = []
 const POLYGON_RIG_PROBE := ["Hips", "Spine_01", "Clavicle_L", "Ankle_L"]
 const SIDEKICK_RIG_PROBE := ["pelvis", "thigh_l", "calf_l", "ball_l"]
 
-## Bone names unique to a rig that has been retargeted onto
-## SkeletonProfileHumanoid. `Hips` survives retargeting unchanged, so it proves
-## nothing on its own; these four exist only under the profile.
+## Bone names unique to a rig retargeted onto SkeletonProfileHumanoid. `Hips`
+## survives retargeting unchanged, so it proves nothing on its own.
 const HUMANOID_RIG_PROBE := ["UpperChest", "LeftUpperArm", "RightUpperLeg", "LeftFoot"]
 
 
@@ -386,9 +385,8 @@ func process_pack_folder(pack_folder: String) -> void:
 		print("[%d/%d] Processing: %s" % [i + 1, total_fbx, fbx_path.get_file()])
 		process_fbx_file(fbx_path)
 
-	# Sidekick characters span many FBX, so they cannot be built inside the
-	# per-FBX loop above the way POLYGON characters are. They get their own
-	# pack-level pass, driven by sidekick_characters.json.
+	# Sidekick characters span many FBX, so unlike POLYGON characters they get
+	# their own pack-level pass, driven by sidekick_characters.json.
 	build_sidekick_characters(pack_folder)
 	write_sidekick_parts_index()
 
@@ -444,30 +442,18 @@ const MIN_BONE_COVERAGE := 0.90
 
 ## Minimum agreement between a character's and a library's bone rest directions.
 ##
-## This measures the property that actually decides whether a clip can pose a
-## rig, which name coverage never did: almost every track is an absolute local
-## rotation, so the rests have to agree. Measured 0.997-1.000 for a retargeted
-## pair, and ~0 for Synty's raw character-vs-clip rigs, whose Spine rests are
-## orthogonal - X for the character, Y for the clips.
+## The property that actually decides whether a clip can pose a rig, which name
+## coverage never did. Measured 0.997-1.000 for a retargeted pair, and ~0 for
+## Synty's raw character-vs-clip rigs, whose Spine rests are orthogonal.
 const MIN_REST_AGREEMENT := 0.9
 
-## Name coverage is necessary but NOT sufficient, and must never be relaxed on
-## the strength of the names alone.
+## Name coverage is necessary but NOT sufficient - never relax it on the names
+## alone. Exempting props and fingers takes a character to 100% and binds every
+## clip, and the character then collapses the instant one plays.
 ##
-## Measured on Dark Fantasy: exempting props, fingers, eyes and eyebrows from
-## the count takes every character to 100% "structural" coverage and binds all
-## 857 clips - and the character then collapses into a flat heap the instant one
-## plays, head dropping from y=1.569 to y=0.852, level with the hips. Rendered
-## and looked at; the rest pose in the same scene is a correct A-pose.
-##
-## The reason is that only 4 bones in a library carry position tracks. Every
-## other track is an absolute local *rotation*, not a delta from rest, so a clip
-## poses only the rig whose rest orientations it was authored against. Bone names
-## carry no information about rests: this character's hips rest 0.364 from the
-## position the clips assume, on a rig 0.876 high.
-##
-## Godot's import-time retargeting is the fix that would actually lift this,
-## which is what --retarget uses.
+## Only a handful of bones carry position tracks; every other track is an
+## absolute local rotation, so a clip poses only the rig it was authored
+## against, and names say nothing about rests. --retarget is the real fix.
 
 
 ## Bone names a library's clips drive, keyed by library path.

@@ -45,12 +45,8 @@ class TestPackNameExtraction:
         ) == "POLYGON_NatureBiomes_EnchantedForest"
 
     def test_unity_year_without_minor_version(self):
-        """Goblin War Camp ships as `_Unity_2021_v1_0_2_Unity`.
-
-        The year carries no minor version and the marker repeats at the end.
-        Requiring `_Unity_YYYY_N` left `_Unity_2021` glued to the pack name,
-        which then matched no Unity import folder.
-        """
+        """Some packs ship as `_Unity_2021_v1_0_2_Unity`: no minor version, and
+        the marker repeated at the end."""
         assert extract_pack_name_from_package(
             Path("POLYGON_Goblin_War_Camp_Unity_2021_v1_0_2_Unity.unitypackage")
         ) == "POLYGON_Goblin_War_Camp"
@@ -96,12 +92,8 @@ class TestRouting:
         assert has_sprites(counts)
 
     def test_ui_pack_with_a_few_demo_meshes_takes_both_routes(self):
-        """Dark Fantasy HUD carries 2205 sprites and 6 demo-scene FBX.
-
-        Routing on "no FBX at all" sent it down the mesh path and silently
-        dropped every sprite. Sprites dominating by an order of magnitude is
-        what marks a UI pack, and its handful of meshes still convert.
-        """
+        """A UI pack carries thousands of sprites and a few demo-scene FBX, so
+        routing on "no FBX at all" would drop every sprite."""
         counts = {".png": 2205, ".fbx": 6, ".prefab": 327}
         assert has_meshes(counts)
         assert has_sprites(counts)
@@ -145,10 +137,8 @@ class TestPackGrading:
 class TestPartialUnityImports:
     """A Unity folder that exists is not automatically the better source.
 
-    A pack measured here was imported with exactly one FBX out of 576.
-    Preferring that folder over the .unitypackage produced a pack with no
-    characters and no warning - the directory structure was all there, the
-    meshes were not.
+    A partial import has the directory structure and almost none of the meshes,
+    and preferring it silently loses whatever it is missing.
     """
 
     def test_a_populated_unity_folder_is_used(self, tmp_path):
@@ -338,12 +328,8 @@ class TestPackCounts:
 class TestInProcessConversion:
     """convert_mesh_pack runs converter.py in this process, not a subprocess.
 
-    A subprocess cannot survive being frozen: a PyInstaller build has no
-    interpreter to re-launch and no converter.py to hand it, so shelling out to
-    `sys.executable converter.py` re-runs the GUI itself with arguments it does
-    not understand. These tests pin the two properties the subprocess gave for
-    free - a crash confined to one pack, and a per-pack log complete enough for
-    _read_pack_counts to read back.
+    These pin the two properties the subprocess gave for free: a crash confined
+    to one pack, and a log complete enough for _read_pack_counts to read back.
     """
 
     @staticmethod
@@ -509,12 +495,8 @@ class TestLibraryEntryPoint:
         assert any("outside" in line for line in lines)
 
     def test_other_handlers_are_spared_the_debug_flood(self, tmp_path, monkeypatch):
-        """The GUI's log pane hangs off the root logger with its own level.
-
-        The file log needs DEBUG, but dropping the root level there would pour
-        every converter debug line into the pane regardless of what the user
-        asked for.
-        """
+        """The file log needs DEBUG, but the GUI's log pane hangs off the same
+        root logger with its own level."""
         pane = logging.Handler()
         pane.setLevel(logging.INFO)
         seen = []
@@ -546,9 +528,8 @@ class TestLibraryEntryPoint:
 class TestSidekickDatabaseDiscovery:
     """Synty's tool database does not live in a pack's own folder.
 
-    It installs as Assets/Synty/SidekickCharacters/Database/Side_Kick_Data.db,
-    which matches no pack name - so the per-pack Unity lookup never finds it,
-    and a user who owns the Sidekick tool still got the degraded conversion.
+    It installs as SidekickCharacters/, matching no pack name, so the per-pack
+    Unity lookup never finds it.
     """
 
     def test_the_database_is_found_under_the_unity_assets_root(self, tmp_path):

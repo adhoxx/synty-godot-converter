@@ -537,29 +537,15 @@ SIDEKICK_SLOT_CODES = {
     "38WRAP": "Wrap",
 }
 
-# part_group in sk_part_preset. Measured across all 532 sets, the three groups
-# partition the 38 body slots exactly - 14 + 13 + 11, with no overlap - into
-# three regions rather than into layers stacked on one another:
-#
-#   head   head, eyes, ears, teeth, nose, brows, hair, head and face attachments
-#   upper  torso, arms, hands, back/shoulder/elbow attachments, wrap
-#   lower  hips, legs, feet, hip and knee attachments
-#
-# So a complete character is one set from each, and armour is not a layer over
-# a naked body - the armoured torso replaces the bare one outright.
+# part_group in sk_part_preset. The three groups partition the 38 body slots
+# into regions, not into layers: a complete character is one set from each, and
+# an armoured torso replaces the bare one rather than covering it.
 _PART_GROUP_NAMES = {1: "head", 2: "upper", 3: "lower"}
 
-# The same partition, keyed by slot rather than by the database's integer.
-#
-# Which region a slot belongs to is a property of the slot, not of any
-# character, so it can be stated here once and used by packs converted straight
-# from a .unitypackage - which ship no database. Without it those packs' gear
-# sets carry no region, and a viewer sorting a wardrobe into head/upper/lower
-# finds nothing to put in any of them.
-#
-# Read off the real database and checked: all 76 slot tokens it uses (each slot
-# appears as both its code and its name) agree on a region, none spans two, and
-# the 38 slots divide 14 / 13 / 11.
+# The same partition, keyed by slot. Which region a slot belongs to is a property
+# of the slot, so it can be stated here and used by packs converted straight from
+# a .unitypackage, which ship no database. Read off the database: 14 / 13 / 11,
+# with no slot in two regions.
 SLOT_GROUPS = {
     # head - the face and everything worn on it
     "Head": "head",
@@ -605,9 +591,8 @@ SLOT_GROUPS = {
 }
 
 # sk_part_preset_row.part_type is inconsistent: some rows hold the slot code
-# ("10TORS"), others the slot name outright ("Head"). Reading only codes drops
-# 352 of the 532 presets and every face slot of the rest, silently. Measured on
-# the real database, all 76 distinct values are one form or the other.
+# ("10TORS"), others the slot name ("Head"). Reading only codes silently drops
+# two thirds of the presets and every face slot of the rest.
 _SLOT_NAMES = frozenset(SIDEKICK_SLOT_CODES.values())
 
 def parse_part_name(part_name: str) -> dict[str, str] | None:
@@ -746,10 +731,8 @@ def derive_gear_sets_from_names(part_names: list[str]) -> dict[str, dict]:
     two families share a bare torso - but it needs nothing beyond the part names
     themselves.
 
-    Each family and number is split across the three body regions, because a
-    complete character is one set from each and a set spanning all three is not
-    something a wardrobe can offer. The parts are the same either way; the split
-    is what lets them be mixed.
+    Each family and number is split across the three body regions, so the parts
+    can be mixed: a complete character is one set from each.
 
     Args:
         part_names: Part names, e.g. from a parts index.

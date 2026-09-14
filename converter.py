@@ -1674,9 +1674,8 @@ def apply_retargeting(project_dir: Path) -> int:
         bones = {name: tuple(origin) for name, origin in entry.get("bones", {}).items()}
         resolved, unresolved = resolve_bone_map(bones)
         if unresolved:
-            # Not every skinned thing is a humanoid - capes, tails and a rigged
-            # crossbow all come through here. Say which bones failed and leave
-            # the file to the unretargeted path.
+            # Not every skinned thing is a humanoid - capes and tails come
+            # through here too. Report and leave it to the unretargeted path.
             logger.debug(
                 "No bone map for %s: %d profile bones unresolved (%s)",
                 res_path, len(unresolved), ", ".join(unresolved[:6]))
@@ -1706,9 +1705,7 @@ def apply_retargeting(project_dir: Path) -> int:
         except (ValueError, OSError) as error:
             logger.warning("Retargeting skipped for %s: %s", import_path.name, error)
 
-    # Consume it. A report left behind describes the previous pack, and any
-    # future path that reads one without regenerating it would inject that
-    # pack's bone maps here.
+    # Consume it: a report left behind describes the previous pack.
     try:
         report_path.unlink()
     except OSError as error:
