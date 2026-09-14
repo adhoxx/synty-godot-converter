@@ -74,6 +74,30 @@ _MESH_REF_PATTERN = re.compile(
     r"^\s*m_Mesh:\s*\{fileID:\s*-?\d+,\s*guid:\s*([a-f0-9]{32})", re.MULTILINE
 )
 
+# A prefab *variant* carries no renderer document. Its materials are property
+# modifications on the source FBX, inside the PrefabInstance's m_Modifications
+# list::
+#
+#     - target: {fileID: -7511558181221131132, guid: <fbx guid>, type: 3}
+#       propertyPath: m_Materials.Array.data[0]
+#       value:
+#       objectReference: {fileID: 2100000, guid: <material guid>, type: 2}
+#
+# so the mesh comes from the target's GUID and the material from the
+# objectReference's. Unity wraps long mappings across lines, so each entry is
+# whitespace-normalised before matching rather than read line by line.
+_MODIFICATIONS_KEY_PATTERN = re.compile(r"^(\s*)m_Modifications:\s*$", re.MULTILINE)
+_MODIFICATION_SPLIT_PATTERN = re.compile(r"^\s*-\s+(?=target:)", re.MULTILINE)
+_MODIFICATION_TARGET_PATTERN = re.compile(
+    r"target:\s*\{fileID:\s*-?\d+,\s*guid:\s*([a-f0-9]{32})"
+)
+_MODIFICATION_SLOT_PATTERN = re.compile(
+    r"propertyPath:\s*m_Materials\.Array\.data\[(\d+)\]"
+)
+_MODIFICATION_OBJECT_PATTERN = re.compile(
+    r"objectReference:\s*\{fileID:\s*-?\d+,\s*guid:\s*([a-f0-9]{32})"
+)
+
 # A SkinnedMeshRenderer's bone list, stopped at the first non-entry line.
 _BONES_BLOCK_PATTERN = re.compile(
     r"^\s*m_Bones:\s*$\n((?:\s*-\s*\{fileID:[^}]*\}\s*$\n?)*)",
@@ -155,10 +179,107 @@ def _lod_sort_key(index_and_mesh: tuple[int, MeshMaterials]) -> tuple[int, int]:
     return (lod_level, index)
 
 
+def _material_modifications(text: str) -> list[tuple[str, int, str]]:
+    """Material assignments carried as PrefabInstance modifications.
+
+    Returns:
+        ``(target_guid, slot_index, material_guid)`` per ``m_Materials`` entry,
+        in document order. ``target_guid`` identifies the source FBX and
+        ``slot_index`` the surface the material belongs to.
+    """
+    found: list[tuple[str, int, str]] = []
+
+    for key in _MODIFICATIONS_KEY_PATTERN.finditer(text):
+        indent = len(key.group(1))
+
+        # The list runs until the first line that is neither indented further
+        # than the key nor one of its own sequence entries - Unity writes those
+        # at the key's own indentation.
+        lines: list[str] = []
+        for line in text[key.end() :].splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            line_indent = len(line) - len(line.lstrip())
+            if line_indent < indent:
+                break
+            if line_indent == indent and not stripped.startswith("- "):
+                break
+            lines.append(line)
+
+        for chunk in _MODIFICATION_SPLIT_PATTERN.split("\n".join(lines)):
+            if not chunk.startswith("target:"):
+                continue
+            entry = " ".join(chunk.split())
+
+            slot_match = _MODIFICATION_SLOT_PATTERN.search(entry)
+            if not slot_match:
+                continue
+            target_match = _MODIFICATION_TARGET_PATTERN.search(entry)
+            object_match = _MODIFICATION_OBJECT_PATTERN.search(entry)
+            if not target_match or not object_match:
+                continue
+
+            found.append(
+                (target_match.group(1), int(slot_match.group(1)), object_match.group(1))
+            )
+
+    return found
+
+
+def _meshes_from_modifications(
+    text: str,
+    prefab_name: str,
+    guid_to_material_name: dict[str, str],
+    guid_to_mesh_name: dict[str, str],
+) -> list[MeshMaterials]:
+    """Mesh/material pairs for a prefab variant, grouped by source FBX."""
+    by_target: dict[str, dict[int, str]] = {}
+
+    for target_guid, slot_index, material_guid in _material_modifications(text):
+        mesh_name = guid_to_mesh_name.get(target_guid)
+        if not mesh_name:
+            logger.debug(
+                "Prefab %s: modification targets unknown mesh GUID %s",
+                prefab_name,
+                target_guid,
+            )
+            continue
+
+        material_name = guid_to_material_name.get(material_guid)
+        if not material_name:
+            logger.debug(
+                "Prefab %s: unresolved material GUID %s on %s",
+                prefab_name,
+                material_guid,
+                mesh_name,
+            )
+            continue
+
+        by_target.setdefault(target_guid, {})[slot_index] = material_name
+
+    meshes: list[MeshMaterials] = []
+    for target_guid, slots_by_index in by_target.items():
+        slots = [
+            MaterialSlot(
+                material_name=slots_by_index[index],
+                texture_name=None,
+                uses_custom_shader=True,
+            )
+            for index in sorted(slots_by_index)
+        ]
+        meshes.append(
+            MeshMaterials(mesh_name=guid_to_mesh_name[target_guid], slots=slots)
+        )
+
+    return meshes
+
+
 def parse_prefab_bytes(
     data: bytes,
     prefab_name: str,
     guid_to_material_name: dict[str, str],
+    guid_to_mesh_name: dict[str, str] | None = None,
 ) -> PrefabMaterials | None:
     """Extract mesh-to-material assignments from one prefab's raw bytes.
 
@@ -168,12 +289,17 @@ def parse_prefab_bytes(
             without extension).
         guid_to_material_name: Material GUID to material name, as resolved
             from the package's GUID map.
+        guid_to_mesh_name: FBX GUID to mesh name. Needed only to read prefab
+            variants, which name their mesh by GUID rather than by carrying a
+            renderer. Omitting it skips that path.
 
     Returns:
         A ``PrefabMaterials`` with one ``MeshMaterials`` per renderer that
         resolved to both a name and at least one material, ordered LOD0-first.
-        ``None`` if the prefab yielded nothing usable - no renderers, no
-        resolvable materials, or unparseable content.
+        Variants, which hold no renderer, contribute one entry per source FBX
+        named in their modifications. ``None`` if the prefab yielded nothing
+        usable - no renderers, no resolvable materials, or unparseable
+        content.
 
     Example:
         >>> prefab = parse_prefab_bytes(data, "SM_Prop_Barrel_01", guids)
@@ -244,6 +370,12 @@ def parse_prefab_bytes(
         if slots:
             meshes.append(MeshMaterials(mesh_name=mesh_name, slots=slots))
 
+    # Variants carry no renderer at all, so pass 2 finds nothing for them.
+    if not meshes and guid_to_mesh_name:
+        meshes = _meshes_from_modifications(
+            text, prefab_name, guid_to_material_name, guid_to_mesh_name
+        )
+
     if not meshes:
         return None
 
@@ -277,6 +409,12 @@ def build_prefabs_from_package(guid_map) -> list[PrefabMaterials]:
         if pathname.lower().endswith(".mat"):
             guid_to_material_name[guid] = pathname.rsplit("/", 1)[-1][: -len(".mat")]
 
+    # FBX GUID -> mesh name, for prefab variants that name their mesh by GUID.
+    guid_to_mesh_name: dict[str, str] = {}
+    for guid, pathname in guid_map.guid_to_pathname.items():
+        if pathname.lower().endswith(".fbx"):
+            guid_to_mesh_name[guid] = pathname.rsplit("/", 1)[-1][: -len(".fbx")]
+
     prefabs: list[PrefabMaterials] = []
     skipped = 0
 
@@ -288,7 +426,9 @@ def build_prefabs_from_package(guid_map) -> list[PrefabMaterials]:
         if not prefab_name:
             prefab_name = guid
 
-        prefab = parse_prefab_bytes(content, prefab_name, guid_to_material_name)
+        prefab = parse_prefab_bytes(
+            content, prefab_name, guid_to_material_name, guid_to_mesh_name
+        )
         if prefab is None:
             skipped += 1
             continue

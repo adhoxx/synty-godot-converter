@@ -279,6 +279,138 @@ MeshRenderer:
         assert parse_prefab_bytes(b"", "Empty", GUIDS) is None
 
 
+# Prefab *variant*. It carries no renderer document at all: the material is a
+# property modification on the source FBX. Shape taken verbatim from
+# POLYGON_NatureBiomes_MeadowForest/SM_Prop_HandCart_01.prefab.
+VARIANT = _prefab(
+    """--- !u!1001 &6121675629342051127
+PrefabInstance:
+  m_ObjectHideFlags: 0
+  serializedVersion: 2
+  m_Modification:
+    m_TransformParent: {fileID: 0}
+    m_Modifications:
+    - target: {fileID: -8679921383154817045, guid: fbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfb, type: 3}
+      propertyPath: m_LocalPosition.x
+      value: 0
+      objectReference: {fileID: 0}
+    - target: {fileID: -7511558181221131132, guid: fbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfb, type: 3}
+      propertyPath: m_Materials.Array.data[0]
+      value: 
+      objectReference: {fileID: 2100000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 2}
+    m_RemovedComponents: []
+  m_SourcePrefab: {fileID: 100100000, guid: fbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfb, type: 3}
+"""
+)
+
+# Unity wraps long mappings, so `target:` is not reliably on one line. 94 of
+# POLYGON_Dwarven_Dungeon_Map's prefabs are written this way; a single-line
+# regex silently under-matches them.
+VARIANT_WRAPPED = _prefab(
+    """--- !u!1001 &1
+PrefabInstance:
+  m_Modification:
+    m_Modifications:
+    - target: {fileID: -7511558181221131132, guid: fbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfb,
+        type: 3}
+      propertyPath: m_Materials.Array.data[0]
+      value: 
+      objectReference: {fileID: 2100000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,
+        type: 2}
+  m_SourcePrefab: {fileID: 100100000, guid: fbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfb, type: 3}
+"""
+)
+
+# Multi-slot variant: one FBX, two material slots. 17 per pack look like this,
+# e.g. SM_Gen_Bld_Background_10 (Generic_01_A + Generic_Glass_Opaque).
+VARIANT_MULTI_SLOT = _prefab(
+    """--- !u!1001 &1
+PrefabInstance:
+  m_Modification:
+    m_Modifications:
+    - target: {fileID: -7511558181221131132, guid: fbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfb, type: 3}
+      propertyPath: m_Materials.Array.data[1]
+      value: 
+      objectReference: {fileID: 2100000, guid: 1a64cf0a23f83924f9debcb452685f6f, type: 2}
+    - target: {fileID: -7511558181221131132, guid: fbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfb, type: 3}
+      propertyPath: m_Materials.Array.data[0]
+      value: 
+      objectReference: {fileID: 2100000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 2}
+  m_SourcePrefab: {fileID: 100100000, guid: fbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfb, type: 3}
+"""
+)
+
+# FBX GUID -> mesh name, as resolved from GuidMap.guid_to_pathname.
+MESH_GUIDS = {"fbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfb": "SM_Prop_HandCart_01"}
+
+
+class TestPrefabVariants:
+    """Variants express materials as modifications, not renderer documents.
+
+    Without this path hundreds of meshes per pack get no mapping and render
+    with Godot's imported StandardMaterial3D - flat white - while the
+    conversion still reports success.
+    """
+
+    def test_variant_yields_mesh_and_material(self):
+        result = parse_prefab_bytes(VARIANT, "SM_Prop_HandCart_01", GUIDS, MESH_GUIDS)
+        assert result is not None
+        assert [m.mesh_name for m in result.meshes] == ["SM_Prop_HandCart_01"]
+        assert [s.material_name for s in result.meshes[0].slots] == ["Trim_Mat"]
+
+    def test_variant_slots_use_custom_shader(self):
+        """Same reasoning as the renderer path: route through determine_shader."""
+        result = parse_prefab_bytes(VARIANT, "X", GUIDS, MESH_GUIDS)
+        assert result.meshes[0].slots[0].uses_custom_shader is True
+
+    def test_wrapped_target_mapping_is_matched(self):
+        result = parse_prefab_bytes(VARIANT_WRAPPED, "X", GUIDS, MESH_GUIDS)
+        assert result is not None
+        assert result.meshes[0].slots[0].material_name == "Trim_Mat"
+
+    def test_multi_slot_variant_keeps_slots_in_index_order(self):
+        result = parse_prefab_bytes(VARIANT_MULTI_SLOT, "X", GUIDS, MESH_GUIDS)
+        assert [s.material_name for s in result.meshes[0].slots] == [
+            "Trim_Mat",
+            "Ghost_Mat",
+        ]
+
+    def test_unresolvable_mesh_guid_yields_none(self):
+        assert parse_prefab_bytes(VARIANT, "X", GUIDS, {}) is None
+
+    def test_unresolvable_material_guid_yields_none(self):
+        assert parse_prefab_bytes(VARIANT, "X", {}, MESH_GUIDS) is None
+
+    def test_renderer_form_still_parses(self):
+        """Regression guard: the plain path must be untouched."""
+        result = parse_prefab_bytes(SINGLE_MESH, "SM_Prop_Barrel_01", GUIDS, MESH_GUIDS)
+        assert result.meshes[0].mesh_name == "SM_Prop_Barrel_01"
+        assert result.meshes[0].slots[0].material_name == "Dungeons_Texture_01_Mat"
+
+    def test_renderer_form_wins_over_modifications(self):
+        """A prefab with real renderers must not also be read as a variant."""
+        result = parse_prefab_bytes(SINGLE_MESH, "X", GUIDS, MESH_GUIDS)
+        assert len(result.meshes) == 1
+
+    def test_mesh_guid_map_is_optional(self):
+        """Callers that pass no mesh map keep the old behaviour."""
+        assert parse_prefab_bytes(VARIANT, "X", GUIDS) is None
+
+    def test_modifications_without_materials_yield_none(self):
+        data = _prefab(
+            """--- !u!1001 &1
+PrefabInstance:
+  m_Modification:
+    m_Modifications:
+    - target: {fileID: -1, guid: fbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfb, type: 3}
+      propertyPath: m_LocalPosition.x
+      value: 0
+      objectReference: {fileID: 0}
+"""
+        )
+        assert parse_prefab_bytes(data, "X", GUIDS, MESH_GUIDS) is None
+
+
 class _FakeGuidMap:
     """Minimal stand-in for unity_package.GuidMap."""
 
