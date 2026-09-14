@@ -2,7 +2,11 @@ extends SceneTree
 
 ## Exercises SidekickCharacter against the real converted library.
 ##
-## Run: godot --headless --path <output root> --script res://test_sidekick_character.gd
+## Usage: copy this file into a project with a converted SIDEKICK pack, then
+##
+##     godot --headless --path <your project> --script res://test_sidekick_character.gd
+##
+## Headless is fine here: this one asserts rather than renders.
 ##
 ## The palette check is the important one: it samples every worn part's UV
 ## texels against the baked palette and fails on a pure red one, which is

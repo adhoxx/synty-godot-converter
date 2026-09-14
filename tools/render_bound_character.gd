@@ -7,20 +7,62 @@ extends SceneTree
 ## gear silently drifted out of the scene, so a bind is not confirmed until a
 ## frame of it has been looked at.
 ##
+## Usage: copy this file into your converted project, then
+##
+##     godot --path <your project> --script res://render_bound_character.gd
+##
 ## Run WITHOUT --headless: a headless process renders nothing and saves a blank
-## image.
+## image. Three PNGs land beside the project - at rest, mid-clip, and later in
+## the same clip.
+##
+## With no arguments it finds a rigged character for you. Set CHARACTER to check
+## a particular one, and TAG to name the output files:
+##
+##     CHARACTER=res://POLYGON_Vikings/meshes/tscn_separate/SM_Chr_Viking_01.tscn
+##     TAG=viking
 
-const DEFAULT_CHARACTER := "res://POLYGON_Dark_Fantasy/meshes/tscn_separate/SM_Chr_DarkLord_Male_01.tscn"
-
-## Override with CHARACTER=res://... to check a different pack's rig. Per-pack
-## rig differences are exactly what a total bind count hides.
-var CHARACTER: String = DEFAULT_CHARACTER
+## Empty means "find one", which is what a fresh conversion needs: naming a pack
+## here would be naming one the user may not own.
+var CHARACTER: String = ""
 ## Renders land in the project being checked, under res://.
 const OUT_DIR := "res://"
 
 ## Frames to let the viewport settle before a capture. One frame renders black:
 ## the viewport has not drawn yet.
 const SETTLE_FRAMES := 20
+
+
+## Finds any converted character scene, so the script runs against whatever the
+## user actually converted rather than a pack this repo happened to test with.
+##
+## @returns String A res:// path, or "" when the project holds no rigged
+##                 character.
+func _first_character(path: String = "res://") -> String:
+	var dir := DirAccess.open(path)
+	if dir == null:
+		return ""
+	for name in dir.get_files():
+		# Synty names every character mesh SM_Chr_, but so are the attachments
+		# that hang off one, and those carry no skeleton - so open it and look.
+		if not name.begins_with("SM_Chr_") or not name.ends_with(".tscn"):
+			continue
+		var packed := load(path.path_join(name)) as PackedScene
+		if packed == null:
+			continue
+		var node := packed.instantiate()
+		var rigged: bool = (
+			_find(node, "Skeleton3D") != null and _find(node, "AnimationPlayer") != null
+		)
+		node.free()
+		if rigged:
+			return path.path_join(name)
+	for name in dir.get_directories():
+		if name.begins_with("."):
+			continue
+		var found := _first_character(path.path_join(name))
+		if not found.is_empty():
+			return found
+	return ""
 
 
 func _find(node: Node, type: String) -> Node:
@@ -37,6 +79,14 @@ func _init():
 	var override := OS.get_environment("CHARACTER")
 	if not override.is_empty():
 		CHARACTER = override
+	elif CHARACTER.is_empty():
+		CHARACTER = _first_character()
+		if CHARACTER.is_empty():
+			print("RENDER no rigged character found under res:// - convert a "
+				+ "character pack first, or set CHARACTER=res://...")
+			quit(1)
+			return
+		print("RENDER found %s" % CHARACTER)
 	var suffix := OS.get_environment("TAG")
 	if suffix.is_empty():
 		suffix = "default"

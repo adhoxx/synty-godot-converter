@@ -60,6 +60,7 @@ MyGodotProject/
 | **`converter.py`** | Convert one pack, with control over every option. |
 | **The Sidekick viewer** | Browse and customise modular characters. Installed into your project automatically. |
 | **`tools/extract_fbx.py`** | Pull just the FBX out of a `.unitypackage`. |
+| **`tools/*.gd`** | Check a conversion by looking at it, rather than by counting. |
 
 ### The GUI
 
@@ -90,6 +91,27 @@ Useful while iterating on one pack - `--filter Barrel` converts only matching
 meshes - but for a whole library `synty_library.py` makes these decisions for
 you. Note that its `--retarget` is off by default, where the library tool has it
 on; see [Retargeting](#retargeting-and-how-polygon-characters-get-animated).
+
+### Checking a conversion by looking at it
+
+Three Godot scripts in `tools/` verify a conversion the way counting cannot.
+Each is run against a converted project, so **copy it into that project first** -
+its paths are `res://`, not repo paths:
+
+```bash
+cp tools/render_bound_character.gd MyGodotProject/
+godot --path MyGodotProject --script res://render_bound_character.gd
+```
+
+| Script | Checks | Headless? |
+|--------|--------|-----------|
+| `render_bound_character.gd` | A character at rest, mid-clip and later in the clip, as three PNGs. Finds a rigged character on its own; set `CHARACTER=res://...` to pick one. | **No** - a headless run saves blank images |
+| `render_sidekick_equip.gd` | A Sidekick character assembles, and swapping a body region for another family's gear leaves it coherent. | **No** |
+| `test_sidekick_character.gd` | Asserts across the whole wardrobe: every gear set equips, bones resolve, joint offsets survive playback, and no part shows an undefined (bright red) colour slot. | Yes |
+
+This matters because numeric checks on this project have passed twice while a
+character was a flat heap. A bind is not confirmed until a frame of it has been
+looked at.
 
 ## Using your converted assets in Godot
 

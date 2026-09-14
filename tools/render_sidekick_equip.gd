@@ -2,8 +2,16 @@ extends SceneTree
 
 ## Renders a character before and after equipping gear from another family.
 ##
+## Usage: copy this file into a project with a converted SIDEKICK pack, then
+##
+##     godot --path <your project> --script res://render_sidekick_equip.gd
+##
 ## Run WITHOUT --headless: a headless process renders nothing and saves a blank
-## image.
+## image. Two PNGs land beside the project, shot_body.png and shot_geared.png.
+##
+## Proves the wardrobe end to end: that parts assemble onto a shared skeleton,
+## and that swapping a whole body region for another family's gear leaves a
+## coherent character rather than a heap.
 
 const SidekickCharacterScript := preload("res://addons/synty_sidekick/sidekick_character.gd")
 
