@@ -52,7 +52,12 @@ from pathlib import Path
 from unity_package import extract_unitypackage, GuidMap, get_material_guids, get_material_name
 from unity_parser import parse_material_bytes, UnityMaterial
 from shader_mapping import map_material, detect_shader_type, determine_shader, MappedMaterial
-from tres_generator import generate_tres, write_tres_file, sanitize_filename
+from tres_generator import (
+    generate_tres,
+    sanitize_filename,
+    stamp_resource_uids,
+    write_tres_file,
+)
 from material_list import (
     parse_material_list,
     generate_mesh_material_mapping_json,
@@ -2838,23 +2843,28 @@ def run_conversion(config: ConversionConfig) -> ConversionStats:
                 else:
                     texture_base = f"res://{pack_name}/textures"
 
+                # Materials sit beside the textures, so the same base locates
+                # both - and the .tres needs its own res:// path to derive a UID.
+                material_base = texture_base.rsplit("/", 1)[0] + "/materials"
+
                 for mapped_mat in mapped_materials:
                     # Skip materials not used by filtered FBX files
                     if filtered_material_names is not None and mapped_mat.name not in filtered_material_names:
                         continue
 
                     try:
+                        # Sanitize filename
+                        filename = sanitize_filename(mapped_mat.name) + ".tres"
+                        output_path = materials_dir / filename
+
                         # Generate .tres content with discovered shader paths
                         tres_content = generate_tres(
                             mapped_mat,
                             shader_base="res://shaders",  # Fallback if shader not in shader_paths
                             texture_base=texture_base,
-                            shader_paths=shader_paths
+                            shader_paths=shader_paths,
+                            res_path=f"{material_base}/{filename}"
                         )
-
-                        # Sanitize filename
-                        filename = sanitize_filename(mapped_mat.name) + ".tres"
-                        output_path = materials_dir / filename
 
                         if config.dry_run:
                             logger.debug("[DRY RUN] Would write material: %s", output_path)
@@ -3264,6 +3274,14 @@ def run_conversion(config: ConversionConfig) -> ConversionStats:
                     )
         else:
             logger.info("Step 12: Skipping Godot CLI...")
+
+        # Step 13: Give generated resources a UID. Godot assigns one only when
+        # the editor saves a resource, so without this every generated scene and
+        # material stays unaddressable as uid:// - including from quick-open.
+        if not config.dry_run:
+            stamped = stamp_resource_uids(pack_output_dir, project_dir)
+            if stamped:
+                logger.info("Step 13: Stamped %d resource UID(s)", stamped)
 
         # Write conversion log (not in dry run for the log file itself)
         # Note: log goes to project root (next to project.godot) and appends
