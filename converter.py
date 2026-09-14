@@ -90,11 +90,13 @@ logger = logging.getLogger(__name__)
 # Records which metadata schema a converted pack was written against, so an
 # existing pack converted by an earlier version refreshes its metadata instead
 # of skipping ahead forever with whatever fields that version happened to emit.
-# Bump this whenever the shape of mesh_material_mapping.json,
+# Bump this whenever the shape *or the content* of mesh_material_mapping.json,
 # character_definitions.json, sidekick_characters.json or
-# sidekick_rig_adjustments.json changes.
+# sidekick_rig_adjustments.json changes. A fix that derives more than the last
+# version did is exactly as stale to an existing pack as a renamed field: the
+# pack skips straight to mesh generation and keeps the thinner mapping forever.
 PACK_METADATA_FILENAME = "pack_metadata.json"
-PACK_METADATA_VERSION = 4
+PACK_METADATA_VERSION = 5
 
 
 def has_source_assets_recursive(path: Path) -> bool:
