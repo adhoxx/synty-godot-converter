@@ -1253,6 +1253,15 @@ func extract_and_save_mesh(mesh_instance: MeshInstance3D, relative_dir: String, 
 			scene_mesh_instance.set_surface_override_material(i, material)
 			materials_applied += 1
 
+	# A mesh with SOME surfaces overridden still looks like a success to any
+	# count of scenes that "have a material", while the surfaces left on
+	# Godot's imported material render flat white. Six characters shipped that
+	# way before anyone noticed, so say it per surface.
+	if materials_applied > 0 and materials_applied < original_mesh.get_surface_count():
+		_report_warning("      Warning: %s has %d of %d surfaces materialed" % [
+			mesh_name, materials_applied, original_mesh.get_surface_count()
+		])
+
 	# Handle duplicate mesh names by appending FBX source name
 	if saved_mesh_names.has(output_path):
 		# Mesh with this name already saved from a different FBX

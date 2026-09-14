@@ -97,7 +97,7 @@ logger = logging.getLogger(__name__)
 # version did is exactly as stale to an existing pack as a renamed field: the
 # pack skips straight to mesh generation and keeps the thinner mapping forever.
 PACK_METADATA_FILENAME = "pack_metadata.json"
-PACK_METADATA_VERSION = 6
+PACK_METADATA_VERSION = 7
 
 
 def has_source_assets_recursive(path: Path) -> bool:
