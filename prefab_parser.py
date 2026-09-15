@@ -104,6 +104,9 @@ _BONES_BLOCK_PATTERN = re.compile(
     re.MULTILINE,
 )
 
+# One bone reference inside that block.
+_BONE_FILE_ID_PATTERN = re.compile(r"fileID:\s*(-?\d+)")
+
 # Smallest bone count that counts as a character rig.
 #
 # "Has an active SkinnedMeshRenderer" alone does not mean "is a character":
@@ -111,11 +114,17 @@ _BONES_BLOCK_PATTERN = re.compile(
 # over-match turns 33 tents, flag lines and FX light rays into character
 # definitions, which then fail in Godot and produce a wall of spurious errors.
 #
-# Bone count separates the two cleanly, with a wide empty gap on both packs
-# measured: FX light rays use 2 bones and every tent or flag line uses 5,
-# while the smallest real character rig uses 49. Anything in between does not
-# occur, so the exact threshold matters little - this one sits in the gap with
-# room for a leaner character rig on some future pack.
+# The count is the union of the bones every active skinned renderer names, not
+# the largest single renderer. A modular character - POLYGON_Modular_Fantasy_Hero
+# builds each of its 126 presets out of ~17 separate parts - skins each part only
+# to the bones it needs, so a forearm binds 12 and no single renderer reaches the
+# threshold. Its parts together cover 49-58.
+#
+# Bone count separates the two cleanly, with a wide empty gap on every pack
+# measured: FX light rays use 2 bones and every tent or flag line uses 5, while
+# the smallest real character rig uses 49. Anything in between does not occur, so
+# the exact threshold matters little - this one sits in the gap with room for a
+# leaner character rig on some future pack.
 MIN_CHARACTER_BONES = 16
 
 # Trailing _LOD<n> used to order meshes so LOD0 leads.
@@ -577,7 +586,7 @@ class CharacterDefinition:
         attachments: Names of active non-skinned meshes (equipment). Whether
             each is bone-attached is left to Godot, which has already built a
             BoneAttachment3D for it during FBX import.
-        bone_count: Bones in the largest active skinned renderer's bone list.
+        bone_count: Distinct bones named across every active skinned renderer.
             Recorded for diagnostics; the gate that uses it is
             MIN_CHARACTER_BONES.
     """
@@ -625,25 +634,22 @@ def _models_relative_name(pathname: str) -> str:
     return relative
 
 
-def _count_bones(body: str) -> int:
-    """Number of entries in a SkinnedMeshRenderer's m_Bones list."""
+def _bone_ids(body: str) -> set[str]:
+    """fileIDs of the bones in a SkinnedMeshRenderer's m_Bones list."""
     match = _BONES_BLOCK_PATTERN.search(body)
     if not match:
-        return 0
-    block = match.group(1).strip()
-    if not block:
-        return 0
-    return len(block.splitlines())
+        return set()
+    return set(_BONE_FILE_ID_PATTERN.findall(match.group(1)))
 
 
 def build_character_definitions(guid_map) -> dict[str, CharacterDefinition]:
     """Derive character definitions from the package's prefabs.
 
-    A prefab is a character when it holds an *active* SkinnedMeshRenderer
-    driven by at least MIN_CHARACTER_BONES bones. Synty ships one such prefab
-    per character, each containing the whole shared hierarchy with every other
-    character disabled, so the active set is exactly that character's body plus
-    its equipment.
+    A prefab is a character when its *active* SkinnedMeshRenderers name at
+    least MIN_CHARACTER_BONES distinct bones between them. Synty ships one such
+    prefab per character, each containing the whole shared hierarchy with every
+    other character disabled, so the active set is exactly that character's body
+    plus its equipment.
 
     The bone-count condition is not redundant. Synty also skins cloth - tent
     covers, flag lines, FX light rays - so an active SkinnedMeshRenderer on its
@@ -689,7 +695,7 @@ def build_character_definitions(guid_map) -> dict[str, CharacterDefinition]:
         skinned: list[str] = []
         attachments: list[str] = []
         mesh_guid = ""
-        bone_count = 0
+        bones: set[str] = set()
 
         for class_id, _anchor, body in documents:
             if class_id not in _RENDERER_CLASSES:
@@ -702,7 +708,7 @@ def build_character_definitions(guid_map) -> dict[str, CharacterDefinition]:
                 continue
             if class_id == _CLASS_SKINNED_MESH_RENDERER:
                 skinned.append(name)
-                bone_count = max(bone_count, _count_bones(body))
+                bones |= _bone_ids(body)
                 if not mesh_guid:
                     mesh_match = _MESH_REF_PATTERN.search(body)
                     if mesh_match:
@@ -713,6 +719,7 @@ def build_character_definitions(guid_map) -> dict[str, CharacterDefinition]:
         if not skinned:
             continue
 
+        bone_count = len(bones)
         if bone_count < MIN_CHARACTER_BONES:
             logger.debug(
                 "Skipping '%s': %d bone(s), below the %d needed for a character "

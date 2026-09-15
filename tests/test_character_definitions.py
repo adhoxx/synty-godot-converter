@@ -18,10 +18,14 @@ def _prefab(body: str) -> bytes:
     return ("%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n" + body).encode("utf-8")
 
 
-def _bones(count: int, *, indent: str = "  ") -> str:
-    """An m_Bones block with `count` entries, as Unity serialises it."""
+def _bones(count: int, *, indent: str = "  ", start: int = 9000) -> str:
+    """An m_Bones block with `count` entries, as Unity serialises it.
+
+    `start` picks which bones of a shared skeleton the block names, so two
+    blocks can overlap the way a modular character's parts do.
+    """
     lines = [f"{indent}m_Bones:"]
-    lines += [f"{indent}- {{fileID: {9000 + i}}}" for i in range(count)]
+    lines += [f"{indent}- {{fileID: {start + i}}}" for i in range(count)]
     return "\n".join(lines)
 
 
@@ -205,6 +209,64 @@ GameObject:
 --- !u!137 &2
 SkinnedMeshRenderer:
   m_GameObject: {{fileID: 1}}
+{_bones(5)}
+  m_Mesh: {{fileID: 4300072, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}}
+"""
+        )
+        assert build_character_definitions(_guid_map({"pm": data})) == {}
+
+    def test_modular_character_counts_bones_across_its_parts(self):
+        """POLYGON_Modular_Fantasy_Hero assembles a character out of ~17 parts,
+        each skinned only to the bones it needs - a forearm binds 12. Taking the
+        largest single part rejected 117 of its 126 characters; the parts
+        together cover 49-58 bones of one shared skeleton.
+        """
+        data = _prefab(
+            f"""--- !u!1 &1
+GameObject:
+  m_Name: Chr_FantasyHero_Preset_99
+  m_IsActive: 1
+--- !u!137 &2
+SkinnedMeshRenderer:
+  m_GameObject: {{fileID: 1}}
+{_bones(12, start=9000)}
+  m_Mesh: {{fileID: 4300072, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}}
+--- !u!1 &3
+GameObject:
+  m_Name: Chr_FantasyHero_Preset_99_Legs
+  m_IsActive: 1
+--- !u!137 &4
+SkinnedMeshRenderer:
+  m_GameObject: {{fileID: 3}}
+{_bones(12, start=9008)}
+  m_Mesh: {{fileID: 4300072, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}}
+"""
+        )
+        defs = build_character_definitions(_guid_map({"pm": data}))
+        # 9000-9011 and 9008-9019: 20 distinct bones, not 12.
+        # The definition is keyed by the prefab path, not the GameObject.
+        assert defs["Character_Mystery"].bone_count == 20
+
+    def test_cloth_stays_rejected_when_several_pieces_share_a_prefab(self):
+        """The union must not rescue cloth: a tent's covers are skinned to the
+        same handful of bones, so together they still name only those bones."""
+        data = _prefab(
+            f"""--- !u!1 &1
+GameObject:
+  m_Name: SM_Bld_Camp_Tent_01
+  m_IsActive: 1
+--- !u!137 &2
+SkinnedMeshRenderer:
+  m_GameObject: {{fileID: 1}}
+{_bones(5)}
+  m_Mesh: {{fileID: 4300072, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}}
+--- !u!1 &3
+GameObject:
+  m_Name: SM_Bld_Camp_Tent_Cover_01
+  m_IsActive: 1
+--- !u!137 &4
+SkinnedMeshRenderer:
+  m_GameObject: {{fileID: 3}}
 {_bones(5)}
   m_Mesh: {{fileID: 4300072, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}}
 """
